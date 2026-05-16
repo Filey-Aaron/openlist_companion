@@ -78,7 +78,7 @@
   }
 
   .ol-tmdb-modal {
-    width: min(980px, 100%);
+    width: min(1120px, 100%);
     max-height: min(760px, calc(100vh - 40px));
     overflow: hidden;
     background: var(--hope-colors-neutral1, #fff);
@@ -164,6 +164,8 @@
     user-select: none;
   }
 
+  .ol-tmdb-modal[data-mode="movie"] .ol-tmdb-tv-only,
+  .ol-tmdb-modal[data-mode="tv"] .ol-tmdb-movie-only,
   .ol-tmdb-mode-fields[data-mode="movie"] .ol-tmdb-tv-only,
   .ol-tmdb-mode-fields[data-mode="tv"] .ol-tmdb-movie-only {
     display: none;
@@ -247,6 +249,71 @@
   .ol-tmdb-code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     word-break: break-all;
+  }
+
+  .ol-tmdb-preview-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .ol-tmdb-preview-head > div {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+
+  .ol-tmdb-batch-actions {
+    flex-wrap: wrap;
+  }
+
+  .ol-tmdb-batch-table {
+    overflow-x: auto;
+    border: 1px solid var(--hope-colors-neutral5, #e8e8e8);
+    border-radius: 6px;
+    background: var(--hope-colors-neutral1, #fff);
+  }
+
+  .ol-tmdb-batch-head,
+  .ol-tmdb-batch-row {
+    min-width: 820px;
+    display: grid;
+    grid-template-columns: minmax(190px, 1.4fr) 54px 54px minmax(110px, 0.8fr) minmax(220px, 1.4fr) minmax(110px, 0.8fr);
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--hope-colors-neutral5, #e8e8e8);
+  }
+
+  .ol-tmdb-batch-head {
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--hope-colors-neutral11, #555);
+    background: var(--hope-colors-neutral2, #fafafa);
+  }
+
+  .ol-tmdb-batch-row:last-child {
+    border-bottom: 0;
+  }
+
+  .ol-tmdb-batch-input {
+    min-height: 30px;
+    padding: 5px 7px;
+    text-align: center;
+  }
+
+  .ol-tmdb-batch-target,
+  .ol-tmdb-batch-status {
+    word-break: break-all;
+  }
+
+  .ol-tmdb-batch-row[data-kind="error"] .ol-tmdb-batch-status {
+    color: var(--hope-colors-danger9, #d4380d);
+  }
+
+  .ol-tmdb-batch-row[data-kind="ok"] .ol-tmdb-batch-status {
+    color: var(--hope-colors-success9, #237804);
   }
 
   .ol-tmdb-status {

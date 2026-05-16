@@ -32,9 +32,11 @@
     const state = {
       files: [],
       selectedName: "",
+      selectedNames: [],
       results: [],
       selectedItem: null,
       selectedEpisode: null,
+      tvBatchRows: [],
       mode: "movie",
       currentPath: "/",
       write: false,
@@ -166,16 +168,29 @@
     const itemDisplayTitle = (item) =>
       item?.title || item?.name || item?.original_title || item?.original_name || "";
 
+    const positiveNumber = (value) => {
+      const number = Number(value);
+      return Number.isInteger(number) && number > 0 ? number : 0;
+    };
+
+    const tvEpisodeCode = (season, episode) =>
+      `S${String(season || 1).padStart(2, "0")}E${String(episode || 0).padStart(2, "0")}`;
+
+    const tvEpisodeBaseName = (show, episode, season, episodeNumber) => {
+      const title = safeFilePart(itemDisplayTitle(show));
+      const episodeTitle = safeFilePart(episode?.name || "");
+      const code = tvEpisodeCode(season, episodeNumber);
+      return episodeTitle ? `${title} - ${code} - ${episodeTitle}` : `${title} - ${code}`;
+    };
+
     const targetBaseName = () => {
       if (!state.selectedItem) return "";
       const title = safeFilePart(itemDisplayTitle(state.selectedItem));
       const year = itemYear(state.selectedItem);
       if (state.mode === "tv") {
-        const season = Number($(".ol-tmdb-season")?.value || 1);
-        const episode = Number($(".ol-tmdb-episode")?.value || 0);
-        const episodeCode = `S${String(season || 1).padStart(2, "0")}E${String(episode || 0).padStart(2, "0")}`;
-        const episodeTitle = safeFilePart(state.selectedEpisode?.name || "");
-        return episodeTitle ? `${title} - ${episodeCode} - ${episodeTitle}` : `${title} - ${episodeCode}`;
+        const season = positiveNumber($(".ol-tmdb-season")?.value) || 1;
+        const episode = positiveNumber($(".ol-tmdb-episode")?.value);
+        return tvEpisodeBaseName(state.selectedItem, state.selectedEpisode, season, episode);
       }
       return year ? `${title} (${year})` : title;
     };
@@ -186,7 +201,11 @@
       return `${targetBaseName()}.${extname(file.name)}`;
     };
 
-    const selectedFile = () => state.files.find((file) => file.name === state.selectedName);
+    const selectedFile = () =>
+      state.files.find((file) => file.name === state.selectedName) ||
+      state.files.find((file) => file.name === state.selectedNames[0]);
+
+    const isTvBatchActive = () => state.mode === "tv" && state.selectedNames.length > 1;
 
     const setStatus = (message, kind = "") => {
       const node = $(".ol-tmdb-status");
@@ -197,7 +216,7 @@
 
     const setBusy = (busy) => {
       state.loading = busy;
-      document.querySelectorAll(".ol-tmdb-action, .ol-tmdb-input, .ol-tmdb-select").forEach((el) => {
+      document.querySelectorAll(".ol-tmdb-action, .ol-tmdb-input, .ol-tmdb-select, .ol-tmdb-file input, .ol-tmdb-check input").forEach((el) => {
         if (el.dataset.keepEnabled === "true") return;
         el.disabled = busy;
       });
@@ -343,9 +362,14 @@ ${studios}
 `;
     };
 
-    const buildEpisodeNfo = (show, episode) => {
-      const seasonNumber = Number($(".ol-tmdb-season")?.value || episode.season_number || 1);
-      const episodeNumber = Number($(".ol-tmdb-episode")?.value || episode.episode_number || 0);
+    const buildEpisodeNfo = (show, episode, seasonOverride = "", episodeOverride = "") => {
+      const seasonNumber = positiveNumber(seasonOverride) ||
+        positiveNumber($(".ol-tmdb-season")?.value) ||
+        positiveNumber(episode.season_number) ||
+        1;
+      const episodeNumber = positiveNumber(episodeOverride) ||
+        positiveNumber($(".ol-tmdb-episode")?.value) ||
+        positiveNumber(episode.episode_number);
       const thumb = buildImageUrl(episode.still_path, "original");
       return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <episodedetails>
@@ -363,6 +387,123 @@ ${studios}
 `;
     };
 
+    const syncTvBatchRows = () => {
+      if (state.mode !== "tv") {
+        state.tvBatchRows = [];
+        return;
+      }
+      const existingRows = new Map(state.tvBatchRows.map((row) => [row.name, row]));
+      const selectedSet = new Set(state.selectedNames);
+      state.selectedNames = state.files
+        .map((file) => file.name)
+        .filter((name) => selectedSet.has(name));
+      state.tvBatchRows = state.selectedNames.map((name) => {
+        const parsed = parseEpisodeName(name);
+        const previous = existingRows.get(name);
+        const season = positiveNumber(previous?.season) || parsed?.season || "";
+        const episode = positiveNumber(previous?.episode) || parsed?.episode || "";
+        const sameEpisode =
+          previous &&
+          positiveNumber(previous.season) === positiveNumber(season) &&
+          positiveNumber(previous.episode) === positiveNumber(episode);
+        return {
+          name,
+          parsed: Boolean(parsed),
+          season,
+          episode,
+          episodeDetails: sameEpisode ? previous.episodeDetails : null,
+          error: sameEpisode ? previous.error || "" : "",
+          result: previous?.result || "",
+        };
+      });
+    };
+
+    const batchRowStatus = (row) => {
+      if (!positiveNumber(row.season) || !positiveNumber(row.episode)) {
+        return { text: "待填写季 / 集", kind: "error" };
+      }
+      if (row.error) return { text: row.error, kind: "error" };
+      if (row.result) return { text: row.result, kind: "ok" };
+      if (row.episodeDetails) return { text: "已匹配", kind: "ok" };
+      return { text: row.parsed ? "待更新" : "已手动填写，待更新", kind: "" };
+    };
+
+    const batchRowTarget = (row) => {
+      const file = state.files.find((item) => item.name === row.name);
+      const season = positiveNumber(row.season);
+      const episode = positiveNumber(row.episode);
+      if (!file || !state.selectedItem || !season || !episode) {
+        return { videoName: "", nfoName: "" };
+      }
+      const base = tvEpisodeBaseName(state.selectedItem, row.episodeDetails, season, episode);
+      return {
+        videoName: `${base}.${extname(file.name)}`,
+        nfoName: `${base}.nfo`,
+      };
+    };
+
+    const updateBatchInput = (input) => {
+      const row = state.tvBatchRows.find((item) => item.name === input.dataset.name);
+      if (!row) return;
+      row[input.dataset.field] = positiveNumber(input.value) || "";
+      row.episodeDetails = null;
+      row.error = "";
+      row.result = "";
+    };
+
+    const fetchTvBatchEpisodes = async (rows = state.tvBatchRows) => {
+      let success = 0;
+      let failed = 0;
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const season = positiveNumber(row.season);
+        const episode = positiveNumber(row.episode);
+        row.result = "";
+        if (!season || !episode) {
+          row.episodeDetails = null;
+          row.error = "请填写季 / 集";
+          failed += 1;
+          continue;
+        }
+        try {
+          setStatus(`正在读取 ${tvEpisodeCode(season, episode)} (${index + 1}/${rows.length})...`);
+          row.episodeDetails = await getTvEpisode(state.selectedItem.id, season, episode);
+          row.error = "";
+          success += 1;
+        } catch (error) {
+          row.episodeDetails = null;
+          row.error = error.message;
+          failed += 1;
+        }
+      }
+      return { success, failed };
+    };
+
+    const hydrateTvBatchEpisodes = async () => {
+      if (!isTvBatchActive()) {
+        setStatus("请在电视剧模式下选择至少两集", "error");
+        return;
+      }
+      if (!state.selectedItem) {
+        setStatus("请先选择 TMDB 电视剧条目", "error");
+        return;
+      }
+      syncTvBatchRows();
+      setBusy(true);
+      try {
+        const result = await fetchTvBatchEpisodes();
+        render();
+        setStatus(
+          result.failed
+            ? `已更新 ${result.success} 集，${result.failed} 项需要修正`
+            : `已更新 ${result.success} 集`,
+          result.failed ? "error" : "ok",
+        );
+      } finally {
+        setBusy(false);
+      }
+    };
+
     const renderFiles = () => {
       const list = $(".ol-tmdb-files");
       if (!list) return;
@@ -370,21 +511,44 @@ ${studios}
         list.innerHTML = '<div class="ol-tmdb-file"><div></div><div class="ol-tmdb-name">当前目录没有视频文件</div><div></div></div>';
         return;
       }
+      const tvMode = state.mode === "tv";
+      const selectedSet = new Set(state.selectedNames);
       list.innerHTML = state.files
         .map(
-          (file) => `<label class="ol-tmdb-file" data-selected="${file.name === state.selectedName}">
-            <input type="radio" name="ol-tmdb-file" value="${escapeHtml(file.name)}" ${file.name === state.selectedName ? "checked" : ""}>
+          (file) => {
+            const selected = tvMode ? selectedSet.has(file.name) : file.name === state.selectedName;
+            return `<label class="ol-tmdb-file" data-selected="${selected}">
+            <input type="${tvMode ? "checkbox" : "radio"}" name="${tvMode ? "ol-tmdb-tv-file" : "ol-tmdb-file"}" value="${escapeHtml(file.name)}" ${selected ? "checked" : ""}>
             <span class="ol-tmdb-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
             <span class="ol-tmdb-meta">${formatSize(file.size)}</span>
-          </label>`,
+          </label>`;
+          },
         )
         .join("");
       list.querySelectorAll("input").forEach((input) => {
         input.addEventListener("change", () => {
-          state.selectedName = input.value;
-          state.selectedItem = null;
-          state.selectedEpisode = null;
-          state.results = [];
+          if (state.mode === "tv") {
+            if (input.checked) {
+              state.selectedNames = [...new Set([...state.selectedNames, input.value])];
+              state.selectedName = input.value;
+            } else {
+              state.selectedNames = state.selectedNames.filter((name) => name !== input.value);
+              if (state.selectedName === input.value) state.selectedName = state.selectedNames[0] || "";
+            }
+            const keepSelectedShow = state.selectedItem && state.selectedNames.length > 1;
+            if (!keepSelectedShow) {
+              state.selectedItem = null;
+              state.results = [];
+            }
+            state.selectedEpisode = null;
+            syncTvBatchRows();
+          } else {
+            state.selectedName = input.value;
+            state.selectedNames = [input.value];
+            state.selectedItem = null;
+            state.selectedEpisode = null;
+            state.results = [];
+          }
           hydrateSearchFromFile();
           render();
         });
@@ -423,9 +587,70 @@ ${studios}
       });
     };
 
+    const renderBatchPreview = (preview) => {
+      syncTvBatchRows();
+      if (!state.selectedNames.length) {
+        preview.innerHTML = "请选择一个或多个电视剧视频文件";
+        return;
+      }
+      if (!state.selectedItem) {
+        preview.innerHTML = `已选择 ${state.selectedNames.length} 集，请先选择 TMDB 电视剧条目`;
+        return;
+      }
+      const rows = state.tvBatchRows;
+      preview.innerHTML = `
+        <div class="ol-tmdb-preview-head">
+          <div>
+            <strong>逐集预览</strong>
+            <span class="ol-tmdb-meta">${escapeHtml(itemDisplayTitle(state.selectedItem))} · ${rows.length} 集</span>
+          </div>
+          <button class="ol-tmdb-action ol-tmdb-update-batch" type="button">更新逐集预览</button>
+        </div>
+        <div class="ol-tmdb-batch-table">
+          <div class="ol-tmdb-batch-head">
+            <span>原文件</span>
+            <span>季</span>
+            <span>集</span>
+            <span>TMDB 集名</span>
+            <span>输出</span>
+            <span>状态</span>
+          </div>
+          ${rows.map((row) => {
+            const target = batchRowTarget(row);
+            const status = batchRowStatus(row);
+            return `<div class="ol-tmdb-batch-row" data-kind="${escapeHtml(status.kind)}">
+              <span class="ol-tmdb-code" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</span>
+              <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="season" type="text" inputmode="numeric" value="${escapeHtml(row.season)}">
+              <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="episode" type="text" inputmode="numeric" value="${escapeHtml(row.episode)}">
+              <span>${escapeHtml(row.episodeDetails?.name || "")}</span>
+              <span class="ol-tmdb-batch-target">${target.videoName ? `${escapeHtml(target.videoName)}<br><span class="ol-tmdb-meta">${escapeHtml(target.nfoName)}</span>` : "待填写"}</span>
+              <span class="ol-tmdb-batch-status">${escapeHtml(status.text)}</span>
+            </div>`;
+          }).join("")}
+        </div>
+      `;
+      $(".ol-tmdb-update-batch", preview)?.addEventListener("click", hydrateTvBatchEpisodes);
+      preview.querySelectorAll(".ol-tmdb-batch-input").forEach((input) => {
+        input.addEventListener("change", () => {
+          updateBatchInput(input);
+          renderPreview();
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            updateBatchInput(input);
+            hydrateTvBatchEpisodes();
+          }
+        });
+      });
+    };
+
     const renderPreview = () => {
       const preview = $(".ol-tmdb-preview");
       if (!preview) return;
+      if (isTvBatchActive()) {
+        renderBatchPreview(preview);
+        return;
+      }
       const file = selectedFile();
       if (!file) {
         preview.innerHTML = "请选择一个视频文件";
@@ -448,11 +673,15 @@ ${studios}
       renderFiles();
       renderResults();
       renderPreview();
+      const executeButton = $(".ol-tmdb-execute");
+      if (executeButton) executeButton.textContent = isTvBatchActive() ? "批量执行" : "执行";
     };
 
     const updateModeUi = () => {
       const modeFields = $(".ol-tmdb-mode-fields");
       if (modeFields) modeFields.dataset.mode = state.mode;
+      const modal = $(".ol-tmdb-modal");
+      if (modal) modal.dataset.mode = state.mode;
       const title = $("#ol-tmdb-title");
       if (title) title.textContent = `TMDB ${state.mode === "tv" ? "电视剧" : "电影"}匹配`;
     };
@@ -524,6 +753,22 @@ ${studios}
         (state.selectedName && state.files.some((file) => file.name === state.selectedName) && state.selectedName) ||
         state.files[0]?.name ||
         "";
+      if (state.mode === "tv") {
+        const available = new Set(state.files.map((file) => file.name));
+        const previousSelected = state.selectedNames.filter((name) => available.has(name));
+        state.selectedNames =
+          previousSelected.length && (!preferredName || previousSelected.includes(preferredName))
+            ? previousSelected
+            : preferredName && state.selectedName === preferredName
+              ? [preferredName]
+              : state.selectedName
+                ? [state.selectedName]
+                : [];
+        syncTvBatchRows();
+      } else {
+        state.selectedNames = state.selectedName ? [state.selectedName] : [];
+        state.tvBatchRows = [];
+      }
       if (state.selectedName) hydrateSearchFromFile();
       render();
       setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
@@ -560,6 +805,18 @@ ${studios}
       try {
         state.selectedItem = state.mode === "tv" ? await getTvDetails(id) : await getMovieDetails(id);
         state.selectedEpisode = null;
+        if (state.mode === "tv" && isTvBatchActive()) {
+          syncTvBatchRows();
+          const result = await fetchTvBatchEpisodes();
+          render();
+          setStatus(
+            result.failed
+              ? `已选择 TMDB 条目，${result.failed} 项需要修正`
+              : `已选择 TMDB 条目，已匹配 ${result.success} 集`,
+            result.failed ? "error" : "ok",
+          );
+          return;
+        }
         if (state.mode === "tv") {
           const season = Number($(".ol-tmdb-season")?.value || 1);
           const episode = Number($(".ol-tmdb-episode")?.value || 0);
@@ -576,7 +833,131 @@ ${studios}
       }
     };
 
+    const executeTvBatch = async () => {
+      syncTvBatchRows();
+      if (!state.tvBatchRows.length) {
+        setStatus("请选择要批量处理的电视剧文件", "error");
+        return;
+      }
+      if (!state.selectedItem) {
+        setStatus("请选择 TMDB 电视剧条目", "error");
+        return;
+      }
+      const doRename = $(".ol-tmdb-do-rename").checked;
+      const doNfo = $(".ol-tmdb-do-nfo").checked;
+      if (!doRename && !doNfo) {
+        setStatus("请至少选择一个操作", "error");
+        return;
+      }
+      if (!state.write) {
+        setStatus("当前目录没有写权限，无法执行", "error");
+        return;
+      }
+      const invalidRows = state.tvBatchRows.filter((row) => !positiveNumber(row.season) || !positiveNumber(row.episode));
+      if (invalidRows.length) {
+        invalidRows.forEach((row) => {
+          row.error = "请填写季 / 集";
+        });
+        render();
+        setStatus(`${invalidRows.length} 项缺少季 / 集，请先补齐`, "error");
+        return;
+      }
+
+      setBusy(true);
+      try {
+        localStorage.setItem(STORAGE.rename, doRename ? "true" : "false");
+        localStorage.setItem(STORAGE.nfo, doNfo ? "true" : "false");
+        await fetchTvBatchEpisodes();
+
+        const existingNames = new Set(state.files.map((file) => file.name));
+        const targetNames = new Set();
+        state.tvBatchRows.forEach((row) => {
+          if (row.error || !row.episodeDetails) return;
+          const file = state.files.find((item) => item.name === row.name);
+          if (!file) {
+            row.error = "原文件不存在";
+            return;
+          }
+          if (!doRename) return;
+          const target = batchRowTarget(row).videoName;
+          if (targetNames.has(target)) {
+            row.error = "目标文件名重复";
+            return;
+          }
+          if (target !== row.name && existingNames.has(target)) {
+            row.error = "目标文件已存在";
+            return;
+          }
+          targetNames.add(target);
+        });
+
+        const rowsToRun = state.tvBatchRows.filter((row) => !row.error && row.episodeDetails);
+        if (!rowsToRun.length) {
+          render();
+          setStatus("没有可执行的剧集，请检查预览中的错误", "error");
+          return;
+        }
+
+        let success = 0;
+        for (let index = 0; index < rowsToRun.length; index += 1) {
+          const row = rowsToRun[index];
+          const target = batchRowTarget(row);
+          setStatus(`正在处理 ${index + 1}/${rowsToRun.length}: ${row.name}`);
+          try {
+            const messages = [];
+            if (doRename) {
+              if (target.videoName !== row.name) {
+                await batchRename(state.currentPath, row.name, target.videoName);
+                row.name = target.videoName;
+                messages.push("改名完成");
+              } else {
+                messages.push("文件名无需变更");
+              }
+            }
+            if (doNfo) {
+              const nfo = buildEpisodeNfo(state.selectedItem, row.episodeDetails, row.season, row.episode);
+              await putFile(joinPath(state.currentPath, target.nfoName), nfo);
+              messages.push("NFO 上传完成");
+            }
+            row.result = messages.join("，") || "完成";
+            success += 1;
+          } catch (error) {
+            row.error = error.message;
+          }
+        }
+
+        const failedNames = state.tvBatchRows
+          .filter((row) => row.error)
+          .map((row) => row.name);
+        const finalFailed = failedNames.length;
+        state.selectedNames = failedNames;
+        state.selectedName = failedNames[0] || "";
+        state.selectedEpisode = null;
+        if (failedNames.length < 2) {
+          state.selectedItem = null;
+          state.results = [];
+          state.tvBatchRows = [];
+        }
+        await loadFiles(failedNames[0] || "");
+        render();
+        setStatus(
+          finalFailed
+            ? `批量完成 ${success} 集，失败 ${finalFailed} 集`
+            : `批量完成 ${success} 集`,
+          finalFailed ? "error" : "ok",
+        );
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
     const execute = async () => {
+      if (isTvBatchActive()) {
+        await executeTvBatch();
+        return;
+      }
       const file = selectedFile();
       if (!file) {
         setStatus("请选择一个视频文件", "error");
@@ -684,6 +1065,11 @@ ${studios}
                 <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
                 <div class="ol-tmdb-files"></div>
               </div>
+              <div class="ol-tmdb-row ol-tmdb-tv-only ol-tmdb-batch-actions">
+                <button class="ol-tmdb-action ol-tmdb-select-all-files" type="button">全选</button>
+                <button class="ol-tmdb-action ol-tmdb-select-parsed-files" type="button">选择可解析</button>
+                <button class="ol-tmdb-action ol-tmdb-clear-files" type="button">清空</button>
+              </div>
             </section>
             <section class="ol-tmdb-panel">
               <div class="ol-tmdb-row ol-tmdb-mode-fields" data-mode="movie">
@@ -731,11 +1117,53 @@ ${studios}
       document.body.appendChild(mask);
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
+      $(".ol-tmdb-select-all-files", mask).addEventListener("click", () => {
+        state.selectedNames = state.files.map((file) => file.name);
+        state.selectedName = state.selectedNames[0] || "";
+        if (state.selectedNames.length < 2) {
+          state.selectedItem = null;
+          state.results = [];
+        }
+        state.selectedEpisode = null;
+        syncTvBatchRows();
+        hydrateSearchFromFile();
+        render();
+      });
+      $(".ol-tmdb-select-parsed-files", mask).addEventListener("click", () => {
+        const parsedNames = state.files
+          .filter((file) => parseEpisodeName(file.name))
+          .map((file) => file.name);
+        if (!parsedNames.length) {
+          setStatus("当前目录没有可自动解析季集的视频", "error");
+          return;
+        }
+        state.selectedNames = parsedNames;
+        state.selectedName = parsedNames[0];
+        if (state.selectedNames.length < 2) {
+          state.selectedItem = null;
+          state.results = [];
+        }
+        state.selectedEpisode = null;
+        syncTvBatchRows();
+        hydrateSearchFromFile();
+        render();
+      });
+      $(".ol-tmdb-clear-files", mask).addEventListener("click", () => {
+        state.selectedNames = [];
+        state.selectedName = "";
+        state.selectedItem = null;
+        state.selectedEpisode = null;
+        state.results = [];
+        state.tvBatchRows = [];
+        render();
+      });
       $(".ol-tmdb-mode", mask).addEventListener("change", (event) => {
         state.mode = event.target.value;
         localStorage.setItem(STORAGE.mode, state.mode);
+        state.selectedNames = state.selectedName ? [state.selectedName] : [];
         state.selectedItem = null;
         state.selectedEpisode = null;
+        state.tvBatchRows = [];
         state.results = [];
         updateModeUi();
         hydrateSearchFromFile();
