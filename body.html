@@ -1,0 +1,821 @@
+<script id="ol-tmdb-script">
+  (() => {
+    "use strict";
+
+    if (window.__OPENLIST_TMDB_MATCHER__) return;
+    window.__OPENLIST_TMDB_MATCHER__ = true;
+
+    const STORAGE = {
+      key: "openlist_tmdb_api_key",
+      language: "openlist_tmdb_language",
+      mode: "openlist_tmdb_mode",
+      rename: "openlist_tmdb_rename",
+      nfo: "openlist_tmdb_nfo",
+    };
+    const VIDEO_EXTS = new Set([
+      "mkv",
+      "mp4",
+      "avi",
+      "mov",
+      "wmv",
+      "flv",
+      "ts",
+      "m2ts",
+      "webm",
+      "rmvb",
+      "iso",
+      "m4v",
+      "mpg",
+      "mpeg",
+    ]);
+
+    const state = {
+      files: [],
+      selectedName: "",
+      results: [],
+      selectedItem: null,
+      selectedEpisode: null,
+      mode: "movie",
+      currentPath: "/",
+      write: false,
+      writeContentBypass: false,
+      loading: false,
+    };
+
+    const $ = (selector, root = document) => root.querySelector(selector);
+
+    const escapeXml = (value) =>
+      String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&apos;");
+
+    const escapeHtml = (value) =>
+      String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+
+    const trimSlashes = (value) => String(value || "").replace(/\/+$/, "");
+
+    const basePath = () => {
+      const raw = window.OPENLIST_CONFIG?.base_path || "";
+      if (!raw || raw === "/") return "";
+      return raw.startsWith("/") ? trimSlashes(raw) : `/${trimSlashes(raw)}`;
+    };
+
+    const apiBase = () => {
+      const configured = window.OPENLIST_CONFIG?.api;
+      if (configured) return trimSlashes(configured);
+      return `${location.origin}${basePath()}`;
+    };
+
+    const currentOpenListPath = () => {
+      const base = basePath();
+      let pathname = decodeURIComponent(location.pathname);
+      if (base && pathname.startsWith(base)) pathname = pathname.slice(base.length) || "/";
+      if (!pathname.startsWith("/")) pathname = `/${pathname}`;
+      return pathname || "/";
+    };
+
+    const joinPath = (dir, name) => {
+      const cleanDir = dir && dir !== "/" ? dir.replace(/\/+$/, "") : "";
+      return `${cleanDir}/${name}`.replace(/\/+/g, "/");
+    };
+
+    const extname = (name) => {
+      const index = name.lastIndexOf(".");
+      return index > 0 ? name.slice(index + 1).toLowerCase() : "";
+    };
+
+    const basename = (name) => {
+      const index = name.lastIndexOf(".");
+      return index > 0 ? name.slice(0, index) : name;
+    };
+
+    const isVideo = (obj) => !obj.is_dir && VIDEO_EXTS.has(extname(obj.name));
+
+    const parseMovieName = (name) => {
+      const base = basename(name);
+      const yearMatch = base.match(/(?:^|[.\s_\-[({])((?:19|20)\d{2})(?:$|[.\s_\-\])}])/);
+      const year = yearMatch ? yearMatch[1] : "";
+      const beforeYear = yearMatch ? base.slice(0, yearMatch.index) : base;
+      const title = beforeYear
+        .replace(/\[[^\]]*]/g, " ")
+        .replace(/\([^)]*$/g, " ")
+        .replace(/[._]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return { title: title || base.replace(/[._]+/g, " ").trim(), year };
+    };
+
+    const parseEpisodeName = (name) => {
+      const base = basename(name);
+      const patterns = [
+        /\bS(\d{1,2})\s*E(\d{1,3})\b/i,
+        /\b(\d{1,2})x(\d{1,3})\b/i,
+        /第\s*(\d{1,3})\s*[集话話]/i,
+        /\bEP?\s*(\d{1,3})\b/i,
+      ];
+      for (const pattern of patterns) {
+        const match = base.match(pattern);
+        if (!match) continue;
+        const season = match.length > 2 ? Number(match[1]) : 1;
+        const episode = Number(match.length > 2 ? match[2] : match[1]);
+        const title = base
+          .slice(0, match.index)
+          .replace(/\[[^\]]*]/g, " ")
+          .replace(/[._-]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        return {
+          season: Number.isFinite(season) && season > 0 ? season : 1,
+          episode,
+          title,
+        };
+      }
+      return null;
+    };
+
+    const currentDirectoryTitle = () => {
+      const parts = state.currentPath.split("/").filter(Boolean);
+      const last = parts.at(-1) || "";
+      const parent = parts.at(-2) || last;
+      const candidate = /^(season|s)\s*\d+|第\s*\d+\s*季$/i.test(last) ? parent : last;
+      return candidate.replace(/[._-]+/g, " ").trim();
+    };
+
+    const inferMode = (files) => {
+      const episodeCount = files.filter((file) => parseEpisodeName(file.name)).length;
+      const pathLooksTv = /(?:^|\/)(season\s*\d+|s\d{1,2}|第\s*\d+\s*季)(?:\/|$)/i.test(state.currentPath);
+      return episodeCount >= Math.max(1, Math.ceil(files.length * 0.4)) || pathLooksTv ? "tv" : "movie";
+    };
+
+    const safeFilePart = (value) =>
+      String(value || "")
+        .replace(/[\\/:*?"<>|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const itemYear = (item) =>
+      (item?.release_date || item?.first_air_date || "").slice(0, 4);
+
+    const itemDisplayTitle = (item) =>
+      item?.title || item?.name || item?.original_title || item?.original_name || "";
+
+    const targetBaseName = () => {
+      if (!state.selectedItem) return "";
+      const title = safeFilePart(itemDisplayTitle(state.selectedItem));
+      const year = itemYear(state.selectedItem);
+      if (state.mode === "tv") {
+        const season = Number($(".ol-tmdb-season")?.value || 1);
+        const episode = Number($(".ol-tmdb-episode")?.value || 0);
+        const episodeCode = `S${String(season || 1).padStart(2, "0")}E${String(episode || 0).padStart(2, "0")}`;
+        const episodeTitle = safeFilePart(state.selectedEpisode?.name || "");
+        return episodeTitle ? `${title} - ${episodeCode} - ${episodeTitle}` : `${title} - ${episodeCode}`;
+      }
+      return year ? `${title} (${year})` : title;
+    };
+
+    const targetVideoName = () => {
+      const file = selectedFile();
+      if (!file || !state.selectedItem) return "";
+      return `${targetBaseName()}.${extname(file.name)}`;
+    };
+
+    const selectedFile = () => state.files.find((file) => file.name === state.selectedName);
+
+    const setStatus = (message, kind = "") => {
+      const node = $(".ol-tmdb-status");
+      if (!node) return;
+      node.textContent = message || "";
+      node.dataset.kind = kind;
+    };
+
+    const setBusy = (busy) => {
+      state.loading = busy;
+      document.querySelectorAll(".ol-tmdb-action, .ol-tmdb-input, .ol-tmdb-select").forEach((el) => {
+        if (el.dataset.keepEnabled === "true") return;
+        el.disabled = busy;
+      });
+    };
+
+    const authHeaders = (extra = {}) => ({
+      Authorization: localStorage.getItem("token") || "",
+      ...extra,
+    });
+
+    const openListRequest = async (path, options = {}) => {
+      const response = await fetch(`${apiBase()}/api${path}`, {
+        ...options,
+        headers: authHeaders(options.headers || {}),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : { code: response.status, message: await response.text() };
+      if (!response.ok || (payload.code && payload.code !== 200)) {
+        throw new Error(payload.message || `OpenList API ${response.status}`);
+      }
+      return payload.data;
+    };
+
+    const fsList = async (path) =>
+      openListRequest("/fs/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json;charset=utf-8" },
+        body: JSON.stringify({ path, password: "", page: 1, per_page: 0, refresh: false }),
+      });
+
+    const batchRename = async (srcDir, srcName, newName) =>
+      openListRequest("/fs/batch_rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json;charset=utf-8" },
+        body: JSON.stringify({
+          src_dir: srcDir,
+          rename_objects: [{ src_name: srcName, new_name: newName }],
+        }),
+      });
+
+    const putFile = async (path, text, contentType = "application/xml;charset=utf-8") =>
+      openListRequest("/fs/put", {
+        method: "PUT",
+        headers: {
+          "Content-Type": contentType,
+          "File-Path": encodeURIComponent(path),
+          Overwrite: "true",
+        },
+        body: text,
+      });
+
+    const tmdbRequest = async (path, params = {}) => {
+      const key = $(".ol-tmdb-api-key")?.value.trim();
+      if (!key) throw new Error("请先填写 TMDB API Key");
+      localStorage.setItem(STORAGE.key, key);
+      const url = new URL(`https://api.themoviedb.org/3${path}`);
+      url.searchParams.set("language", $(".ol-tmdb-language")?.value || "zh-CN");
+      Object.entries(params).forEach(([name, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          url.searchParams.set(name, value);
+        }
+      });
+
+      const headers = {};
+      const normalizedKey = key.replace(/^Bearer\s+/i, "").trim();
+      if (normalizedKey.startsWith("eyJ") || normalizedKey.length > 64) {
+        headers.Authorization = `Bearer ${normalizedKey}`;
+      } else {
+        url.searchParams.set("api_key", normalizedKey);
+      }
+
+      const response = await fetch(url, { headers });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const authMode = headers.Authorization ? "Bearer token" : "v3 api_key";
+        const detail = payload.status_message || "";
+        throw new Error(
+          detail
+            ? `TMDB ${response.status} (${authMode}): ${detail}`
+            : `TMDB ${response.status} (${authMode})`,
+        );
+      }
+      return payload;
+    };
+
+    const searchMovie = async (query, year) =>
+      tmdbRequest("/search/movie", {
+        query,
+        year,
+        include_adult: "false",
+      });
+
+    const searchTv = async (query, year) =>
+      tmdbRequest("/search/tv", {
+        query,
+        first_air_date_year: year,
+        include_adult: "false",
+      });
+
+    const getMovieDetails = async (id) =>
+      tmdbRequest(`/movie/${id}`, {
+        append_to_response: "credits,release_dates",
+      });
+
+    const getTvDetails = async (id) =>
+      tmdbRequest(`/tv/${id}`, {
+        append_to_response: "credits",
+      });
+
+    const getTvEpisode = async (id, seasonNumber, episodeNumber) =>
+      tmdbRequest(`/tv/${id}/season/${seasonNumber}/episode/${episodeNumber}`);
+
+    const buildImageUrl = (path, size = "w185") =>
+      path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
+
+    const buildMovieNfo = (movie) => {
+      const genres = (movie.genres || [])
+        .map((genre) => `  <genre>${escapeXml(genre.name)}</genre>`)
+        .join("\n");
+      const studios = (movie.production_companies || [])
+        .map((studio) => `  <studio>${escapeXml(studio.name)}</studio>`)
+        .join("\n");
+      const thumb = buildImageUrl(movie.poster_path, "original");
+      const fanart = buildImageUrl(movie.backdrop_path, "original");
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<movie>
+  <title>${escapeXml(movie.title)}</title>
+  <originaltitle>${escapeXml(movie.original_title)}</originaltitle>
+  <year>${escapeXml(itemYear(movie))}</year>
+  <plot>${escapeXml(movie.overview)}</plot>
+  <runtime>${escapeXml(movie.runtime || "")}</runtime>
+  <tmdbid>${escapeXml(movie.id)}</tmdbid>
+  <uniqueid type="tmdb" default="true">${escapeXml(movie.id)}</uniqueid>
+  <premiered>${escapeXml(movie.release_date)}</premiered>
+  <rating>${escapeXml(movie.vote_average)}</rating>
+${genres}
+${studios}
+  <thumb>${escapeXml(thumb)}</thumb>
+  <fanart>${escapeXml(fanart)}</fanart>
+</movie>
+`;
+    };
+
+    const buildEpisodeNfo = (show, episode) => {
+      const seasonNumber = Number($(".ol-tmdb-season")?.value || episode.season_number || 1);
+      const episodeNumber = Number($(".ol-tmdb-episode")?.value || episode.episode_number || 0);
+      const thumb = buildImageUrl(episode.still_path, "original");
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<episodedetails>
+  <title>${escapeXml(episode.name)}</title>
+  <showtitle>${escapeXml(itemDisplayTitle(show))}</showtitle>
+  <season>${escapeXml(seasonNumber)}</season>
+  <episode>${escapeXml(episodeNumber)}</episode>
+  <plot>${escapeXml(episode.overview)}</plot>
+  <aired>${escapeXml(episode.air_date)}</aired>
+  <rating>${escapeXml(episode.vote_average)}</rating>
+  <tmdbid>${escapeXml(episode.id)}</tmdbid>
+  <uniqueid type="tmdb" default="true">${escapeXml(episode.id)}</uniqueid>
+  <thumb>${escapeXml(thumb)}</thumb>
+</episodedetails>
+`;
+    };
+
+    const renderFiles = () => {
+      const list = $(".ol-tmdb-files");
+      if (!list) return;
+      if (!state.files.length) {
+        list.innerHTML = '<div class="ol-tmdb-file"><div></div><div class="ol-tmdb-name">当前目录没有视频文件</div><div></div></div>';
+        return;
+      }
+      list.innerHTML = state.files
+        .map(
+          (file) => `<label class="ol-tmdb-file" data-selected="${file.name === state.selectedName}">
+            <input type="radio" name="ol-tmdb-file" value="${escapeHtml(file.name)}" ${file.name === state.selectedName ? "checked" : ""}>
+            <span class="ol-tmdb-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+            <span class="ol-tmdb-meta">${formatSize(file.size)}</span>
+          </label>`,
+        )
+        .join("");
+      list.querySelectorAll("input").forEach((input) => {
+        input.addEventListener("change", () => {
+          state.selectedName = input.value;
+          state.selectedItem = null;
+          state.selectedEpisode = null;
+          state.results = [];
+          hydrateSearchFromFile();
+          render();
+        });
+      });
+    };
+
+    const renderResults = () => {
+      const list = $(".ol-tmdb-results");
+      if (!list) return;
+      if (!state.results.length) {
+        list.innerHTML = '<div class="ol-tmdb-result"><div></div><div class="ol-tmdb-name">暂无搜索结果</div><div></div></div>';
+        return;
+      }
+      list.innerHTML = state.results
+        .map((item) => {
+          const title = itemDisplayTitle(item);
+          const year = itemYear(item);
+          const selected = state.selectedItem?.id === item.id;
+          const poster = buildImageUrl(item.poster_path, "w154");
+          const original = state.mode === "tv" ? item.original_name : item.original_title;
+          return `<div class="ol-tmdb-result" role="button" tabindex="0" data-id="${item.id}" data-selected="${selected}">
+            ${poster ? `<img class="ol-tmdb-poster" alt="" src="${escapeHtml(poster)}">` : '<div class="ol-tmdb-poster"></div>'}
+            <div>
+              <div class="ol-tmdb-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+              <div class="ol-tmdb-meta">${escapeHtml(year || "未知年份")} · ${escapeHtml((original || "").slice(0, 80))}</div>
+            </div>
+            <button class="ol-tmdb-action" type="button" data-id="${item.id}">选择</button>
+          </div>`;
+        })
+        .join("");
+      list.querySelectorAll(".ol-tmdb-result").forEach((row) => {
+        row.addEventListener("click", () => selectItem(Number(row.dataset.id)));
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") selectItem(Number(row.dataset.id));
+        });
+      });
+    };
+
+    const renderPreview = () => {
+      const preview = $(".ol-tmdb-preview");
+      if (!preview) return;
+      const file = selectedFile();
+      if (!file) {
+        preview.innerHTML = "请选择一个视频文件";
+        return;
+      }
+      if (!state.selectedItem) {
+        preview.innerHTML = `请选择一个 TMDB ${state.mode === "tv" ? "电视剧" : "电影"}条目`;
+        return;
+      }
+      const videoName = targetVideoName();
+      const nfoName = `${targetBaseName()}.nfo`;
+      preview.innerHTML = `
+        <div><strong>原文件</strong> <span class="ol-tmdb-code">${escapeHtml(file.name)}</span></div>
+        <div><strong>新文件</strong> <span class="ol-tmdb-code">${escapeHtml(videoName)}</span></div>
+        <div><strong>NFO</strong> <span class="ol-tmdb-code">${escapeHtml(nfoName)}</span></div>
+      `;
+    };
+
+    const render = () => {
+      renderFiles();
+      renderResults();
+      renderPreview();
+    };
+
+    const updateModeUi = () => {
+      const modeFields = $(".ol-tmdb-mode-fields");
+      if (modeFields) modeFields.dataset.mode = state.mode;
+      const title = $("#ol-tmdb-title");
+      if (title) title.textContent = `TMDB ${state.mode === "tv" ? "电视剧" : "电影"}匹配`;
+    };
+
+    const formatSize = (value) => {
+      if (!Number.isFinite(value) || value <= 0) return "";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let size = value;
+      let index = 0;
+      while (size >= 1024 && index < units.length - 1) {
+        size /= 1024;
+        index += 1;
+      }
+      return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
+    };
+
+    const hydrateSearchFromFile = () => {
+      const file = selectedFile();
+      if (!file) return;
+      const episode = parseEpisodeName(file.name);
+      if (state.mode === "tv") {
+        $(".ol-tmdb-query").value = episode?.title || currentDirectoryTitle();
+        $(".ol-tmdb-year").value = "";
+        $(".ol-tmdb-season").value = episode?.season || 1;
+        $(".ol-tmdb-episode").value = episode?.episode || "";
+        return;
+      }
+      const parsed = parseMovieName(file.name);
+      $(".ol-tmdb-query").value = parsed.title;
+      $(".ol-tmdb-year").value = parsed.year;
+    };
+
+    const chooseNextFileName = (previousName, renamedName) => {
+      const previousEpisode = parseEpisodeName(previousName);
+      const candidates = state.files
+        .filter((file) => file.name !== previousName && file.name !== renamedName)
+        .map((file) => ({ file, episode: parseEpisodeName(file.name) }))
+        .filter(({ episode }) => state.mode !== "tv" || episode)
+        .sort((a, b) => {
+          if (state.mode === "tv") {
+            return a.episode.season - b.episode.season || a.episode.episode - b.episode.episode;
+          }
+          return a.file.name.localeCompare(b.file.name, undefined, { numeric: true, sensitivity: "base" });
+        });
+      if (!candidates.length) return "";
+      if (state.mode === "tv" && previousEpisode) {
+        const next = candidates.find(({ episode }) =>
+          episode.season > previousEpisode.season ||
+          (episode.season === previousEpisode.season && episode.episode > previousEpisode.episode)
+        );
+        if (next) return next.file.name;
+      }
+      return candidates[0].file.name;
+    };
+
+    const loadFiles = async (preferredName = "") => {
+      state.currentPath = currentOpenListPath();
+      const data = await fsList(state.currentPath);
+      state.write = Boolean(data.write);
+      state.writeContentBypass = Boolean(data.write_content_bypass);
+      state.files = (data.content || []).filter(isVideo);
+      const savedMode = localStorage.getItem(STORAGE.mode);
+      state.mode = savedMode === "movie" || savedMode === "tv" ? savedMode : inferMode(state.files);
+      const modeSelect = $(".ol-tmdb-mode");
+      if (modeSelect) modeSelect.value = state.mode;
+      updateModeUi();
+      state.selectedName =
+        (preferredName && state.files.some((file) => file.name === preferredName) && preferredName) ||
+        (state.selectedName && state.files.some((file) => file.name === state.selectedName) && state.selectedName) ||
+        state.files[0]?.name ||
+        "";
+      if (state.selectedName) hydrateSearchFromFile();
+      render();
+      setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
+    };
+
+    const doSearch = async () => {
+      const query = $(".ol-tmdb-query").value.trim();
+      const year = $(".ol-tmdb-year").value.trim();
+      if (!query) {
+        setStatus("请输入搜索关键词", "error");
+        return;
+      }
+      setBusy(true);
+      setStatus("正在搜索 TMDB...");
+      try {
+        localStorage.setItem(STORAGE.language, $(".ol-tmdb-language").value);
+        localStorage.setItem(STORAGE.mode, state.mode);
+        const payload = state.mode === "tv" ? await searchTv(query, year) : await searchMovie(query, year);
+        state.results = (payload.results || []).slice(0, 10);
+        state.selectedItem = null;
+        state.selectedEpisode = null;
+        render();
+        setStatus(state.results.length ? `找到 ${state.results.length} 个结果` : "TMDB 无搜索结果", state.results.length ? "" : "error");
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const selectItem = async (id) => {
+      setBusy(true);
+      setStatus(`正在读取${state.mode === "tv" ? "电视剧" : "电影"}详情...`);
+      try {
+        state.selectedItem = state.mode === "tv" ? await getTvDetails(id) : await getMovieDetails(id);
+        state.selectedEpisode = null;
+        if (state.mode === "tv") {
+          const season = Number($(".ol-tmdb-season")?.value || 1);
+          const episode = Number($(".ol-tmdb-episode")?.value || 0);
+          if (episode > 0) {
+            state.selectedEpisode = await getTvEpisode(id, season || 1, episode);
+          }
+        }
+        render();
+        setStatus("已选择 TMDB 条目", "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const execute = async () => {
+      const file = selectedFile();
+      if (!file) {
+        setStatus("请选择一个视频文件", "error");
+        return;
+      }
+      if (!state.selectedItem) {
+        setStatus(`请选择一个 TMDB ${state.mode === "tv" ? "电视剧" : "电影"}条目`, "error");
+        return;
+      }
+      if (state.mode === "tv" && !Number($(".ol-tmdb-episode")?.value || 0)) {
+        setStatus("电视剧模式需要填写集数", "error");
+        return;
+      }
+      const doRename = $(".ol-tmdb-do-rename").checked;
+      const doNfo = $(".ol-tmdb-do-nfo").checked;
+      if (!doRename && !doNfo) {
+        setStatus("请至少选择一个操作", "error");
+        return;
+      }
+      if (!state.write) {
+        setStatus("当前目录没有写权限，无法执行", "error");
+        return;
+      }
+
+      setBusy(true);
+      const oldName = file.name;
+      const newVideoName = targetVideoName();
+      const nfoName = `${targetBaseName()}.nfo`;
+      const messages = [];
+      const nextName = chooseNextFileName(oldName, newVideoName);
+      try {
+        localStorage.setItem(STORAGE.rename, doRename ? "true" : "false");
+        localStorage.setItem(STORAGE.nfo, doNfo ? "true" : "false");
+        if (doRename) {
+          if (oldName !== newVideoName) {
+            setStatus("正在改名...");
+            await batchRename(state.currentPath, oldName, newVideoName);
+            messages.push("改名完成");
+          } else {
+            messages.push("文件名无需变更");
+          }
+        }
+        if (doNfo) {
+          setStatus("正在上传 NFO...");
+          const nfoPath = joinPath(state.currentPath, nfoName);
+          const nfo = state.mode === "tv"
+            ? buildEpisodeNfo(state.selectedItem, state.selectedEpisode || {
+                id: state.selectedItem.id,
+                name: "",
+                overview: "",
+                air_date: "",
+                vote_average: "",
+              })
+            : buildMovieNfo(state.selectedItem);
+          await putFile(nfoPath, nfo);
+          messages.push("NFO 上传完成");
+        }
+        state.selectedItem = null;
+        state.selectedEpisode = null;
+        state.results = [];
+        await loadFiles(nextName);
+        setStatus(
+          nextName
+            ? `${messages.join("，")}。已自动选中下一项：${nextName}`
+            : `${messages.join("，")}。当前目录没有可继续处理的视频`,
+          "ok",
+        );
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const createModal = () => {
+      if ($("#ol-tmdb-mask")) return;
+      const mask = document.createElement("div");
+      mask.id = "ol-tmdb-mask";
+      mask.className = "ol-tmdb-mask";
+      mask.innerHTML = `
+        <section class="ol-tmdb-modal" role="dialog" aria-modal="true" aria-labelledby="ol-tmdb-title">
+          <header class="ol-tmdb-header">
+            <h2 class="ol-tmdb-title" id="ol-tmdb-title">TMDB 匹配</h2>
+            <button class="ol-tmdb-action ol-tmdb-close" type="button" data-keep-enabled="true">关闭</button>
+          </header>
+          <main class="ol-tmdb-body">
+            <section class="ol-tmdb-panel">
+              <div class="ol-tmdb-field">
+                <label class="ol-tmdb-label">TMDB API Key</label>
+                <input class="ol-tmdb-input ol-tmdb-api-key" type="password" autocomplete="off" placeholder="api_key">
+              </div>
+              <div class="ol-tmdb-row">
+                <label class="ol-tmdb-field" style="flex: 1">
+                  <span class="ol-tmdb-label">语言</span>
+                  <select class="ol-tmdb-select ol-tmdb-language">
+                    <option value="zh-CN">zh-CN</option>
+                    <option value="zh-TW">zh-TW</option>
+                    <option value="en-US">en-US</option>
+                    <option value="ja-JP">ja-JP</option>
+                  </select>
+                </label>
+                <button class="ol-tmdb-action ol-tmdb-reload" type="button">刷新文件</button>
+              </div>
+              <div class="ol-tmdb-list">
+                <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
+                <div class="ol-tmdb-files"></div>
+              </div>
+            </section>
+            <section class="ol-tmdb-panel">
+              <div class="ol-tmdb-row ol-tmdb-mode-fields" data-mode="movie">
+                <label class="ol-tmdb-field" style="flex: 1">
+                  <span class="ol-tmdb-label">模式</span>
+                  <select class="ol-tmdb-select ol-tmdb-mode">
+                    <option value="movie">电影</option>
+                    <option value="tv">电视剧</option>
+                  </select>
+                </label>
+                <label class="ol-tmdb-field" style="flex: 1.5">
+                  <span class="ol-tmdb-label">搜索词</span>
+                  <input class="ol-tmdb-input ol-tmdb-query" type="text">
+                </label>
+                <label class="ol-tmdb-field ol-tmdb-movie-only" style="flex: 0.7">
+                  <span class="ol-tmdb-label">年份</span>
+                  <input class="ol-tmdb-input ol-tmdb-year" type="text" inputmode="numeric">
+                </label>
+                <label class="ol-tmdb-field ol-tmdb-tv-only" style="flex: 0.5">
+                  <span class="ol-tmdb-label">季</span>
+                  <input class="ol-tmdb-input ol-tmdb-season" type="text" inputmode="numeric">
+                </label>
+                <label class="ol-tmdb-field ol-tmdb-tv-only" style="flex: 0.5">
+                  <span class="ol-tmdb-label">集</span>
+                  <input class="ol-tmdb-input ol-tmdb-episode" type="text" inputmode="numeric">
+                </label>
+                <button class="ol-tmdb-action ol-tmdb-search" type="button" data-primary="true" style="align-self: end">搜索</button>
+              </div>
+              <div class="ol-tmdb-list">
+                <div class="ol-tmdb-results"></div>
+              </div>
+              <div class="ol-tmdb-preview"></div>
+              <div class="ol-tmdb-row">
+                <label class="ol-tmdb-check"><input class="ol-tmdb-do-rename" type="checkbox"> 改名</label>
+                <label class="ol-tmdb-check"><input class="ol-tmdb-do-nfo" type="checkbox"> 生成 / 上传 NFO</label>
+              </div>
+            </section>
+          </main>
+          <footer class="ol-tmdb-footer">
+            <div class="ol-tmdb-status"></div>
+            <button class="ol-tmdb-action ol-tmdb-execute" type="button" data-primary="true">执行</button>
+          </footer>
+        </section>
+      `;
+      document.body.appendChild(mask);
+      $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
+      $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
+      $(".ol-tmdb-mode", mask).addEventListener("change", (event) => {
+        state.mode = event.target.value;
+        localStorage.setItem(STORAGE.mode, state.mode);
+        state.selectedItem = null;
+        state.selectedEpisode = null;
+        state.results = [];
+        updateModeUi();
+        hydrateSearchFromFile();
+        render();
+      });
+      $(".ol-tmdb-search", mask).addEventListener("click", doSearch);
+      $(".ol-tmdb-query", mask).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") doSearch();
+      });
+      $(".ol-tmdb-year", mask).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") doSearch();
+      });
+      $(".ol-tmdb-execute", mask).addEventListener("click", execute);
+      mask.addEventListener("click", (event) => {
+        if (event.target === mask) closeModal();
+      });
+      $(".ol-tmdb-api-key", mask).value = localStorage.getItem(STORAGE.key) || "";
+      $(".ol-tmdb-language", mask).value = localStorage.getItem(STORAGE.language) || "zh-CN";
+      $(".ol-tmdb-mode", mask).value = localStorage.getItem(STORAGE.mode) || state.mode;
+      $(".ol-tmdb-do-rename", mask).checked = localStorage.getItem(STORAGE.rename) !== "false";
+      $(".ol-tmdb-do-nfo", mask).checked = localStorage.getItem(STORAGE.nfo) !== "false";
+      updateModeUi();
+    };
+
+    const withStatus = async (task) => {
+      setBusy(true);
+      setStatus("正在载入...");
+      try {
+        await task();
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const openModal = () => {
+      createModal();
+      $("#ol-tmdb-mask").dataset.open = "true";
+      state.results = [];
+      state.selectedItem = null;
+      state.selectedEpisode = null;
+      withStatus(loadFiles);
+    };
+
+    const closeModal = () => {
+      const mask = $("#ol-tmdb-mask");
+      if (mask) mask.dataset.open = "false";
+    };
+
+    const buttonSvg = () => `
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+        <path d="M7 5v14M17 5v14M3 9h4M17 9h4M3 15h4M17 15h4"></path>
+        <path d="M10 12h4"></path>
+      </svg>`;
+
+    const insertButton = () => {
+      if (location.pathname.includes("/@manage")) return;
+      const toolbar = $(".left-toolbar-in") || $(".left-toolbar");
+      if (!toolbar || $("#ol-tmdb-open")) return;
+      const wrap = document.createElement("span");
+      wrap.className = "ol-tmdb-button-wrap";
+      const button = document.createElement("button");
+      button.id = "ol-tmdb-open";
+      button.className = "ol-tmdb-button";
+      button.type = "button";
+      button.setAttribute("aria-label", "TMDB 匹配");
+      button.innerHTML = buttonSvg();
+      button.addEventListener("click", openModal);
+      const tip = document.createElement("span");
+      tip.className = "ol-tmdb-tip";
+      tip.textContent = "TMDB 匹配";
+      wrap.appendChild(button);
+      wrap.appendChild(tip);
+      toolbar.appendChild(wrap);
+    };
+
+    const observer = new MutationObserver(insertButton);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    insertButton();
+  })();
+</script>

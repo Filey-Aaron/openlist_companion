@@ -1,0 +1,11 @@
+# Local reference checkouts used for implementation context.
+/references/
+
+# Local agent/tool metadata.
+/.agents/
+/.codex/
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+*.swp
