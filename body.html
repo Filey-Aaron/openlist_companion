@@ -11,6 +11,7 @@
       mode: "openlist_tmdb_mode",
       rename: "openlist_tmdb_rename",
       nfo: "openlist_tmdb_nfo",
+      image: "openlist_tmdb_image",
     };
     const VIDEO_EXTS = new Set([
       "mkv",
@@ -30,6 +31,7 @@
     ]);
 
     const state = {
+      entries: [],
       files: [],
       selectedName: "",
       selectedNames: [],
@@ -37,6 +39,7 @@
       selectedItem: null,
       selectedEpisode: null,
       tvBatchRows: [],
+      metadataReport: null,
       mode: "movie",
       currentPath: "/",
       write: false,
@@ -99,6 +102,10 @@
     };
 
     const isVideo = (obj) => !obj.is_dir && VIDEO_EXTS.has(extname(obj.name));
+
+    const normalizeName = (name) => String(name || "").toLowerCase();
+
+    const standardEpisodePattern = /\bS\d{2}E\d{2,3}\b/i;
 
     const parseMovieName = (name) => {
       const base = basename(name);
@@ -259,7 +266,7 @@
         }),
       });
 
-    const putFile = async (path, text, contentType = "application/xml;charset=utf-8") =>
+    const putFile = async (path, content, contentType = "application/xml;charset=utf-8") =>
       openListRequest("/fs/put", {
         method: "PUT",
         headers: {
@@ -267,7 +274,7 @@
           "File-Path": encodeURIComponent(path),
           Overwrite: "true",
         },
-        body: text,
+        body: content,
       });
 
     const tmdbRequest = async (path, params = {}) => {
@@ -333,6 +340,21 @@
 
     const buildImageUrl = (path, size = "w185") =>
       path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
+
+    const fetchTmdbImage = async (imagePath, label) => {
+      if (!imagePath) throw new Error(`${label}缺少图片`);
+      const response = await fetch(buildImageUrl(imagePath, "original"));
+      if (!response.ok) throw new Error(`${label}下载失败：HTTP ${response.status}`);
+      return {
+        blob: await response.blob(),
+        contentType: response.headers.get("content-type") || "image/jpeg",
+      };
+    };
+
+    const uploadTmdbImage = async (targetPath, imagePath, label) => {
+      const image = await fetchTmdbImage(imagePath, label);
+      await putFile(targetPath, image.blob, image.contentType);
+    };
 
     const buildMovieNfo = (movie) => {
       const genres = (movie.genres || [])
@@ -439,6 +461,7 @@ ${studios}
       return {
         videoName: `${base}.${extname(file.name)}`,
         nfoName: `${base}.nfo`,
+        imageName: `${base}.jpg`,
       };
     };
 
@@ -555,6 +578,89 @@ ${studios}
       });
     };
 
+    const inspectMetadata = () => {
+      const names = new Set(state.entries.filter((item) => !item.is_dir).map((item) => normalizeName(item.name)));
+      const hasAnyPoster = ["poster.jpg", "folder.jpg", "cover.jpg"].some((name) => names.has(name));
+      const rows = state.files.map((file) => {
+        const base = basename(file.name);
+        const nfoName = `${base}.nfo`;
+        const jpgName = `${base}.jpg`;
+        const posterName = `${base}-poster.jpg`;
+        const issues = [];
+        if (!names.has(normalizeName(nfoName))) issues.push("缺失 NFO");
+        if (!names.has(normalizeName(jpgName)) && !names.has(normalizeName(posterName)) && !hasAnyPoster) {
+          issues.push("缺失 JPG / poster");
+        }
+        if (state.mode === "tv") {
+          const episode = parseEpisodeName(file.name);
+          if (!episode) {
+            issues.push("季集解析失败");
+          } else if (!standardEpisodePattern.test(file.name)) {
+            issues.push(`命名不规范：建议包含 ${tvEpisodeCode(episode.season, episode.episode)}`);
+          }
+        } else {
+          const parsed = parseMovieName(file.name);
+          if (!parsed.year) issues.push("命名不规范：缺少年份");
+          if (parsed.year && !/\((?:19|20)\d{2}\)/.test(base)) {
+            issues.push(`命名不规范：建议使用 (${parsed.year})`);
+          }
+        }
+        return {
+          name: file.name,
+          issues,
+        };
+      });
+      const summary = {
+        total: rows.length,
+        ok: rows.filter((row) => !row.issues.length).length,
+        missingNfo: rows.filter((row) => row.issues.some((issue) => issue.includes("NFO"))).length,
+        missingImage: rows.filter((row) => row.issues.some((issue) => issue.includes("JPG"))).length,
+        naming: rows.filter((row) => row.issues.some((issue) => issue.includes("命名") || issue.includes("季集"))).length,
+      };
+      state.metadataReport = { rows, summary, mode: state.mode };
+    };
+
+    const renderMetadataReport = () => {
+      const node = $(".ol-tmdb-audit");
+      if (!node) return;
+      if (!state.metadataReport) {
+        node.innerHTML = "";
+        return;
+      }
+      const { rows, summary, mode } = state.metadataReport;
+      if (!rows.length) {
+        node.innerHTML = '<div class="ol-tmdb-audit-empty">当前目录没有可检查的视频文件</div>';
+        return;
+      }
+      node.innerHTML = `
+        <div class="ol-tmdb-audit-head">
+          <div>
+            <strong>元数据检查报告</strong>
+            <span class="ol-tmdb-meta">${mode === "tv" ? "电视剧" : "电影"}模式 · ${summary.total} 个视频 · ${summary.ok} 个通过</span>
+          </div>
+          <button class="ol-tmdb-action ol-tmdb-audit-clear" type="button">收起</button>
+        </div>
+        <div class="ol-tmdb-audit-summary">
+          <span>缺 NFO：${summary.missingNfo}</span>
+          <span>缺图片：${summary.missingImage}</span>
+          <span>命名问题：${summary.naming}</span>
+        </div>
+        <div class="ol-tmdb-audit-table">
+          ${rows.map((row) => `
+            <div class="ol-tmdb-audit-row" data-kind="${row.issues.length ? "warn" : "ok"}">
+              <span class="ol-tmdb-code" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</span>
+              <span>${row.issues.length ? escapeHtml(row.issues.join("；")) : "完整"}</span>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      $(".ol-tmdb-audit-clear", node)?.addEventListener("click", () => {
+        state.metadataReport = null;
+        renderMetadataReport();
+        setStatus("");
+      });
+    };
+
     const renderResults = () => {
       const list = $(".ol-tmdb-results");
       if (!list) return;
@@ -623,7 +729,7 @@ ${studios}
               <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="season" type="text" inputmode="numeric" value="${escapeHtml(row.season)}">
               <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="episode" type="text" inputmode="numeric" value="${escapeHtml(row.episode)}">
               <span>${escapeHtml(row.episodeDetails?.name || "")}</span>
-              <span class="ol-tmdb-batch-target">${target.videoName ? `${escapeHtml(target.videoName)}<br><span class="ol-tmdb-meta">${escapeHtml(target.nfoName)}</span>` : "待填写"}</span>
+              <span class="ol-tmdb-batch-target">${target.videoName ? `${escapeHtml(target.videoName)}<br><span class="ol-tmdb-meta">${escapeHtml(target.nfoName)} · ${escapeHtml(target.imageName)} · poster.jpg</span>` : "待填写"}</span>
               <span class="ol-tmdb-batch-status">${escapeHtml(status.text)}</span>
             </div>`;
           }).join("")}
@@ -662,10 +768,12 @@ ${studios}
       }
       const videoName = targetVideoName();
       const nfoName = `${targetBaseName()}.nfo`;
+      const imageName = state.mode === "tv" ? `${targetBaseName()}.jpg` : `${targetBaseName()}-poster.jpg`;
       preview.innerHTML = `
         <div><strong>原文件</strong> <span class="ol-tmdb-code">${escapeHtml(file.name)}</span></div>
         <div><strong>新文件</strong> <span class="ol-tmdb-code">${escapeHtml(videoName)}</span></div>
         <div><strong>NFO</strong> <span class="ol-tmdb-code">${escapeHtml(nfoName)}</span></div>
+        <div><strong>图片</strong> <span class="ol-tmdb-code">${escapeHtml(state.mode === "tv" ? `${imageName} / poster.jpg` : imageName)}</span></div>
       `;
     };
 
@@ -673,6 +781,7 @@ ${studios}
       renderFiles();
       renderResults();
       renderPreview();
+      renderMetadataReport();
       const executeButton = $(".ol-tmdb-execute");
       if (executeButton) executeButton.textContent = isTvBatchActive() ? "批量执行" : "执行";
     };
@@ -742,6 +851,7 @@ ${studios}
       const data = await fsList(state.currentPath);
       state.write = Boolean(data.write);
       state.writeContentBypass = Boolean(data.write_content_bypass);
+      state.entries = data.content || [];
       state.files = (data.content || []).filter(isVideo);
       const savedMode = localStorage.getItem(STORAGE.mode);
       state.mode = savedMode === "movie" || savedMode === "tv" ? savedMode : inferMode(state.files);
@@ -770,8 +880,22 @@ ${studios}
         state.tvBatchRows = [];
       }
       if (state.selectedName) hydrateSearchFromFile();
+      state.metadataReport = null;
       render();
       setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
+    };
+
+    const runMetadataCheck = () => {
+      inspectMetadata();
+      renderMetadataReport();
+      const summary = state.metadataReport.summary;
+      const failed = summary.total - summary.ok;
+      setStatus(
+        failed
+          ? `检查完成：${summary.total - summary.ok} 个视频存在待补项`
+          : `检查完成：${summary.total} 个视频均通过`,
+        failed ? "error" : "ok",
+      );
     };
 
     const doSearch = async () => {
@@ -845,7 +969,8 @@ ${studios}
       }
       const doRename = $(".ol-tmdb-do-rename").checked;
       const doNfo = $(".ol-tmdb-do-nfo").checked;
-      if (!doRename && !doNfo) {
+      const doImage = $(".ol-tmdb-do-image").checked;
+      if (!doRename && !doNfo && !doImage) {
         setStatus("请至少选择一个操作", "error");
         return;
       }
@@ -867,6 +992,7 @@ ${studios}
       try {
         localStorage.setItem(STORAGE.rename, doRename ? "true" : "false");
         localStorage.setItem(STORAGE.nfo, doNfo ? "true" : "false");
+        localStorage.setItem(STORAGE.image, doImage ? "true" : "false");
         await fetchTvBatchEpisodes();
 
         const existingNames = new Set(state.files.map((file) => file.name));
@@ -898,6 +1024,11 @@ ${studios}
           return;
         }
 
+        if (doImage && state.selectedItem.poster_path) {
+          setStatus("正在上传电视剧目录封面...");
+          await uploadTmdbImage(joinPath(state.currentPath, "poster.jpg"), state.selectedItem.poster_path, "电视剧目录封面");
+        }
+
         let success = 0;
         for (let index = 0; index < rowsToRun.length; index += 1) {
           const row = rowsToRun[index];
@@ -918,6 +1049,14 @@ ${studios}
               const nfo = buildEpisodeNfo(state.selectedItem, row.episodeDetails, row.season, row.episode);
               await putFile(joinPath(state.currentPath, target.nfoName), nfo);
               messages.push("NFO 上传完成");
+            }
+            if (doImage) {
+              if (row.episodeDetails.still_path) {
+                await uploadTmdbImage(joinPath(state.currentPath, target.imageName), row.episodeDetails.still_path, "剧集缩略图");
+                messages.push("缩略图上传完成");
+              } else {
+                messages.push("无剧集缩略图");
+              }
             }
             row.result = messages.join("，") || "完成";
             success += 1;
@@ -973,7 +1112,8 @@ ${studios}
       }
       const doRename = $(".ol-tmdb-do-rename").checked;
       const doNfo = $(".ol-tmdb-do-nfo").checked;
-      if (!doRename && !doNfo) {
+      const doImage = $(".ol-tmdb-do-image").checked;
+      if (!doRename && !doNfo && !doImage) {
         setStatus("请至少选择一个操作", "error");
         return;
       }
@@ -986,11 +1126,13 @@ ${studios}
       const oldName = file.name;
       const newVideoName = targetVideoName();
       const nfoName = `${targetBaseName()}.nfo`;
+      const imageName = state.mode === "tv" ? `${targetBaseName()}.jpg` : `${targetBaseName()}-poster.jpg`;
       const messages = [];
       const nextName = chooseNextFileName(oldName, newVideoName);
       try {
         localStorage.setItem(STORAGE.rename, doRename ? "true" : "false");
         localStorage.setItem(STORAGE.nfo, doNfo ? "true" : "false");
+        localStorage.setItem(STORAGE.image, doImage ? "true" : "false");
         if (doRename) {
           if (oldName !== newVideoName) {
             setStatus("正在改名...");
@@ -1014,6 +1156,24 @@ ${studios}
             : buildMovieNfo(state.selectedItem);
           await putFile(nfoPath, nfo);
           messages.push("NFO 上传完成");
+        }
+        if (doImage) {
+          setStatus("正在上传图片...");
+          if (state.mode === "tv") {
+            if (state.selectedEpisode?.still_path) {
+              await uploadTmdbImage(joinPath(state.currentPath, imageName), state.selectedEpisode.still_path, "剧集缩略图");
+              messages.push("缩略图上传完成");
+            } else {
+              messages.push("无剧集缩略图");
+            }
+            if (state.selectedItem.poster_path) {
+              await uploadTmdbImage(joinPath(state.currentPath, "poster.jpg"), state.selectedItem.poster_path, "电视剧目录封面");
+              messages.push("目录封面上传完成");
+            }
+          } else {
+            await uploadTmdbImage(joinPath(state.currentPath, imageName), state.selectedItem.poster_path, "电影封面");
+            messages.push("封面上传完成");
+          }
         }
         state.selectedItem = null;
         state.selectedEpisode = null;
@@ -1060,11 +1220,13 @@ ${studios}
                   </select>
                 </label>
                 <button class="ol-tmdb-action ol-tmdb-reload" type="button">刷新文件</button>
+                <button class="ol-tmdb-action ol-tmdb-audit-run" type="button">元数据检查</button>
               </div>
               <div class="ol-tmdb-list">
                 <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
                 <div class="ol-tmdb-files"></div>
               </div>
+              <div class="ol-tmdb-audit"></div>
               <div class="ol-tmdb-row ol-tmdb-tv-only ol-tmdb-batch-actions">
                 <button class="ol-tmdb-action ol-tmdb-select-all-files" type="button">全选</button>
                 <button class="ol-tmdb-action ol-tmdb-select-parsed-files" type="button">选择可解析</button>
@@ -1105,6 +1267,7 @@ ${studios}
               <div class="ol-tmdb-row">
                 <label class="ol-tmdb-check"><input class="ol-tmdb-do-rename" type="checkbox"> 改名</label>
                 <label class="ol-tmdb-check"><input class="ol-tmdb-do-nfo" type="checkbox"> 生成 / 上传 NFO</label>
+                <label class="ol-tmdb-check"><input class="ol-tmdb-do-image" type="checkbox"> 下载封面 / 缩略图</label>
               </div>
             </section>
           </main>
@@ -1117,6 +1280,7 @@ ${studios}
       document.body.appendChild(mask);
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
+      $(".ol-tmdb-audit-run", mask).addEventListener("click", runMetadataCheck);
       $(".ol-tmdb-select-all-files", mask).addEventListener("click", () => {
         state.selectedNames = state.files.map((file) => file.name);
         state.selectedName = state.selectedNames[0] || "";
@@ -1185,6 +1349,7 @@ ${studios}
       $(".ol-tmdb-mode", mask).value = localStorage.getItem(STORAGE.mode) || state.mode;
       $(".ol-tmdb-do-rename", mask).checked = localStorage.getItem(STORAGE.rename) !== "false";
       $(".ol-tmdb-do-nfo", mask).checked = localStorage.getItem(STORAGE.nfo) !== "false";
+      $(".ol-tmdb-do-image", mask).checked = localStorage.getItem(STORAGE.image) === "true";
       updateModeUi();
     };
 
