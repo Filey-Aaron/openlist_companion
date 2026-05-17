@@ -1,4 +1,3 @@
-<script id="ol-tmdb-script">
   (() => {
     "use strict";
 
@@ -1411,4 +1410,3 @@ ${studios}
     observer.observe(document.documentElement, { childList: true, subtree: true });
     insertButton();
   })();
-</script>

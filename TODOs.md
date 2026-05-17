@@ -2,10 +2,9 @@
 
 ## 已完成
 
-- [x] 拆分注入片段为 `自定义头部` 和 `自定义内容` 两份：
-  - `injections/openlist-tmdb-matcher.head.html`
-  - `injections/openlist-tmdb-matcher.body.html`
-- [x] 保留合并版 `injections/openlist-tmdb-matcher.html` 方便查看完整实现。
+- [x] 拆分注入片段为外链加载的 CSS 和 JS 两份：
+  - `head.css`
+  - `body.js`
 - [x] 在右下角工具栏插入 TMDB 匹配入口。
 - [x] 新增左侧悬浮提示，匹配 OpenList 右下角工具栏交互。
 - [x] 支持在浏览器 `localStorage.openlist_tmdb_api_key` 保存 TMDB API Key。
