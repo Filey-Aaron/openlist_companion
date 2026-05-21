@@ -477,19 +477,29 @@ ${studios}
     const fetchTvBatchEpisodes = async (rows = state.tvBatchRows) => {
       let success = 0;
       let failed = 0;
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index];
+      const CONCURRENCY = 5;
+
+      const validRows = [];
+      for (const row of rows) {
+        row.result = "";
         const season = positiveNumber(row.season);
         const episode = positiveNumber(row.episode);
-        row.result = "";
         if (!season || !episode) {
           row.episodeDetails = null;
           row.error = "请填写季 / 集";
           failed += 1;
-          continue;
+        } else {
+          validRows.push(row);
         }
+      }
+
+      let completed = 0;
+      const total = validRows.length;
+
+      const fetchOne = async (row) => {
+        const season = positiveNumber(row.season);
+        const episode = positiveNumber(row.episode);
         try {
-          setStatus(`正在读取 ${tvEpisodeCode(season, episode)} (${index + 1}/${rows.length})...`);
           row.episodeDetails = await getTvEpisode(state.selectedItem.id, season, episode);
           row.error = "";
           success += 1;
@@ -498,7 +508,21 @@ ${studios}
           row.error = error.message;
           failed += 1;
         }
+        completed += 1;
+        setStatus(`正在读取剧集信息 (${completed}/${total})...`);
+      };
+
+      const pool = new Map();
+      for (let i = 0; i < validRows.length; i += 1) {
+        const task = fetchOne(validRows[i]).then(() => i);
+        pool.set(i, task);
+        if (pool.size >= CONCURRENCY) {
+          const done = await Promise.race(pool.values());
+          pool.delete(done);
+        }
       }
+      await Promise.all(pool.values());
+
       return { success, failed };
     };
 
