@@ -61,7 +61,8 @@
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;");
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
 
     const trimSlashes = (value) => String(value || "").replace(/\/+$/, "");
 
@@ -255,13 +256,13 @@
         body: JSON.stringify({ path, password: "", page: 1, per_page: 0, refresh: false }),
       });
 
-    const batchRename = async (srcDir, srcName, newName) =>
+    const batchRename = async (srcDir, renameObjects) =>
       openListRequest("/fs/batch_rename", {
         method: "POST",
         headers: { "Content-Type": "application/json;charset=utf-8" },
         body: JSON.stringify({
           src_dir: srcDir,
-          rename_objects: [{ src_name: srcName, new_name: newName }],
+          rename_objects: renameObjects,
         }),
       });
 
@@ -1023,6 +1024,23 @@ ${studios}
           return;
         }
 
+        if (doRename) {
+          const renameObjects = [];
+          for (const row of rowsToRun) {
+            const target = batchRowTarget(row);
+            if (target.videoName && target.videoName !== row.name) {
+              renameObjects.push({ src_name: row.name, new_name: target.videoName });
+              row._renamed = target.videoName;
+            } else {
+              row._renamed = row.name;
+            }
+          }
+          if (renameObjects.length) {
+            setStatus(`正在批量改名 ${renameObjects.length} 个文件...`);
+            await batchRename(state.currentPath, renameObjects);
+          }
+        }
+
         if (doImage && state.selectedItem.poster_path) {
           setStatus("正在上传电视剧目录封面...");
           await uploadTmdbImage(joinPath(state.currentPath, "poster.jpg"), state.selectedItem.poster_path, "电视剧目录封面");
@@ -1035,14 +1053,9 @@ ${studios}
           setStatus(`正在处理 ${index + 1}/${rowsToRun.length}: ${row.name}`);
           try {
             const messages = [];
-            if (doRename) {
-              if (target.videoName !== row.name) {
-                await batchRename(state.currentPath, row.name, target.videoName);
-                row.name = target.videoName;
-                messages.push("改名完成");
-              } else {
-                messages.push("文件名无需变更");
-              }
+            if (row._renamed) {
+              messages.push(row._renamed === row.name ? "文件名无需变更" : "改名完成");
+              row.name = row._renamed === row.name ? row.name : row._renamed;
             }
             if (doNfo) {
               const nfo = buildEpisodeNfo(state.selectedItem, row.episodeDetails, row.season, row.episode);
@@ -1135,7 +1148,7 @@ ${studios}
         if (doRename) {
           if (oldName !== newVideoName) {
             setStatus("正在改名...");
-            await batchRename(state.currentPath, oldName, newVideoName);
+            await batchRename(state.currentPath, [{ src_name: oldName, new_name: newVideoName }]);
             messages.push("改名完成");
           } else {
             messages.push("文件名无需变更");
@@ -1386,9 +1399,10 @@ ${studios}
       </svg>`;
 
     const insertButton = () => {
-      if (location.pathname.includes("/@manage")) return;
+      if (location.pathname.includes("/@manage")) return false;
       const toolbar = $(".left-toolbar-in") || $(".left-toolbar");
-      if (!toolbar || $("#ol-tmdb-open")) return;
+      if (!toolbar) return false;
+      if ($("#ol-tmdb-open")) return true;
       const wrap = document.createElement("span");
       wrap.className = "ol-tmdb-button-wrap";
       const button = document.createElement("button");
@@ -1404,9 +1418,18 @@ ${studios}
       wrap.appendChild(button);
       wrap.appendChild(tip);
       toolbar.appendChild(wrap);
+      return true;
     };
 
-    const observer = new MutationObserver(insertButton);
+    const observer = new MutationObserver(() => {
+      if (insertButton()) observer.disconnect();
+    });
     observer.observe(document.documentElement, { childList: true, subtree: true });
-    insertButton();
+    if (!insertButton()) {
+      window.addEventListener("popstate", () => {
+        if (!$("#ol-tmdb-open")) {
+          observer.observe(document.documentElement, { childList: true, subtree: true });
+        }
+      });
+    }
   })();
