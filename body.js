@@ -46,6 +46,7 @@
       write: false,
       writeContentBypass: false,
       loading: false,
+      directoryLoadId: 0,
     };
 
     const $ = (selector, root = document) => root.querySelector(selector);
@@ -215,6 +216,33 @@
       state.files.find((file) => file.name === state.selectedNames[0]);
 
     const isTvBatchActive = () => state.mode === "tv" && state.selectedNames.length > 1;
+
+    const resetDirectoryState = (path = currentOpenListPath()) => {
+      state.directoryLoadId += 1;
+      state.currentPath = path;
+      state.entries = [];
+      state.files = [];
+      state.selectedName = "";
+      state.selectedNames = [];
+      state.results = [];
+      state.selectedItem = null;
+      state.selectedEpisode = null;
+      state.tvBatchRows = [];
+      state.metadataReport = null;
+      state.executionReport = null;
+      state.write = false;
+      state.writeContentBypass = false;
+    };
+
+    const ensureLoadedDirectory = () => {
+      const path = currentOpenListPath();
+      if (path === state.currentPath) return true;
+      resetDirectoryState(path);
+      render();
+      setStatus("目录已切换，正在重新读取文件列表", "error");
+      withStatus(loadFiles);
+      return false;
+    };
 
     const actionOptions = () => ({
       rename: Boolean($(".ol-tmdb-do-rename")?.checked),
@@ -1271,12 +1299,21 @@ ${studios}
     };
 
     const loadFiles = async (preferredName = "") => {
-      state.currentPath = currentOpenListPath();
-      const data = await fsList(state.currentPath);
+      const requestedPath = currentOpenListPath();
+      const loadId = state.directoryLoadId + 1;
+      state.directoryLoadId = loadId;
+      const data = await fsList(requestedPath);
+      if (loadId !== state.directoryLoadId || requestedPath !== currentOpenListPath()) {
+        return false;
+      }
+      if (!data || typeof data !== "object") {
+        throw new Error("OpenList 文件列表响应格式无效");
+      }
+      state.currentPath = requestedPath;
       state.write = Boolean(data.write);
       state.writeContentBypass = Boolean(data.write_content_bypass);
-      state.entries = data.content || [];
-      state.files = (data.content || []).filter(isVideo);
+      state.entries = Array.isArray(data.content) ? data.content : [];
+      state.files = state.entries.filter(isVideo);
       const savedMode = localStorage.getItem(STORAGE.mode);
       state.mode = savedMode === "movie" || savedMode === "tv" ? savedMode : inferMode(state.files);
       const modeSelect = $(".ol-tmdb-mode");
@@ -1307,6 +1344,7 @@ ${studios}
       state.metadataReport = null;
       render();
       setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
+      return true;
     };
 
     const runMetadataCheck = () => {
@@ -1573,6 +1611,7 @@ ${studios}
     };
 
     const execute = async () => {
+      if (!ensureLoadedDirectory()) return;
       if (isTvBatchActive()) {
         await executeTvBatch();
         return;
@@ -1909,6 +1948,8 @@ ${studios}
     };
 
     const openModal = () => {
+      const path = currentOpenListPath();
+      if (path !== state.currentPath) resetDirectoryState(path);
       createModal();
       $("#ol-tmdb-mask").dataset.open = "true";
       state.results = [];
@@ -1929,11 +1970,25 @@ ${studios}
         <path d="M10 12h4"></path>
       </svg>`;
 
-    const insertButton = () => {
-      if (location.pathname.includes("/@manage")) return false;
-      const toolbar = $(".left-toolbar-in") || $(".left-toolbar");
+    const routeExcludesToolbar = () =>
+      /^\/(?:@manage|@login|@test|@s)(?:\/|$)/i.test(currentOpenListPath());
+
+    const removeStaleButtons = (toolbar = null) => {
+      document.querySelectorAll(".ol-tmdb-button-wrap").forEach((wrap) => {
+        if (!toolbar || wrap.parentElement !== toolbar) wrap.remove();
+      });
+    };
+
+    const insertButton = (toolbarBox = $(".left-toolbar-box")) => {
+      if (routeExcludesToolbar()) {
+        removeStaleButtons();
+        return false;
+      }
+      if (!toolbarBox) return false;
+      const toolbar = $(".left-toolbar-in", toolbarBox) || $(".left-toolbar", toolbarBox);
       if (!toolbar) return false;
-      if ($("#ol-tmdb-open")) return true;
+      removeStaleButtons(toolbar);
+      if ($("#ol-tmdb-open", toolbar)) return true;
       const wrap = document.createElement("span");
       wrap.className = "ol-tmdb-button-wrap";
       const button = document.createElement("button");
@@ -1952,15 +2007,129 @@ ${studios}
       return true;
     };
 
-    const observer = new MutationObserver(() => {
-      if (insertButton()) observer.disconnect();
+    let observedToolbarBox = null;
+    let lifecycleScheduled = false;
+    let searchTimer = 0;
+
+    const toolbarObserver = new MutationObserver(() => {
+      insertButton(observedToolbarBox);
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    if (!insertButton()) {
-      window.addEventListener("popstate", () => {
-        if (!$("#ol-tmdb-open")) {
-          observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    const searchObserver = new MutationObserver(() => {
+      scheduleToolbarLifecycle();
+    });
+
+    const bodyObserver = new MutationObserver(() => {
+      scheduleToolbarLifecycle();
+    });
+
+    const hideToolbarDiagnostic = () => {
+      $("#ol-tmdb-toolbar-warning")?.remove();
+    };
+
+    const showToolbarDiagnostic = () => {
+      if (routeExcludesToolbar() || $(".left-toolbar-box") || $("#ol-tmdb-toolbar-warning")) return;
+      const warning = document.createElement("div");
+      warning.id = "ol-tmdb-toolbar-warning";
+      warning.className = "ol-tmdb-toolbar-warning";
+      warning.setAttribute("role", "status");
+      warning.innerHTML = `
+        <span>TMDB 助手未找到 OpenList 工具栏，入口尚未加载。</span>
+        <button type="button" data-action="retry">重试</button>
+        <button type="button" data-action="dismiss" aria-label="关闭">×</button>
+      `;
+      warning.querySelector('[data-action="retry"]').addEventListener("click", () => {
+        warning.remove();
+        startToolbarSearch();
+      });
+      warning.querySelector('[data-action="dismiss"]').addEventListener("click", () => warning.remove());
+      document.body.appendChild(warning);
+    };
+
+    const stopToolbarSearch = () => {
+      searchObserver.disconnect();
+      if (searchTimer) window.clearTimeout(searchTimer);
+      searchTimer = 0;
+    };
+
+    const startToolbarSearch = () => {
+      stopToolbarSearch();
+      if (routeExcludesToolbar()) {
+        hideToolbarDiagnostic();
+        removeStaleButtons();
+        return;
+      }
+      const toolbarBox = $(".left-toolbar-box");
+      if (toolbarBox) {
+        bindToolbarLifecycle();
+        return;
+      }
+      searchObserver.observe(document.body, { childList: true, subtree: true });
+      searchTimer = window.setTimeout(() => {
+        searchObserver.disconnect();
+        searchTimer = 0;
+        showToolbarDiagnostic();
+      }, 8000);
+    };
+
+    const bindToolbarLifecycle = () => {
+      if (routeExcludesToolbar()) {
+        toolbarObserver.disconnect();
+        observedToolbarBox = null;
+        stopToolbarSearch();
+        hideToolbarDiagnostic();
+        removeStaleButtons();
+        return;
+      }
+      const nextToolbarBox = $(".left-toolbar-box");
+      if (nextToolbarBox !== observedToolbarBox) {
+        toolbarObserver.disconnect();
+        observedToolbarBox = nextToolbarBox;
+        if (observedToolbarBox) {
+          toolbarObserver.observe(observedToolbarBox, { childList: true, subtree: true });
         }
+      }
+      if (observedToolbarBox) {
+        stopToolbarSearch();
+        hideToolbarDiagnostic();
+        insertButton(observedToolbarBox);
+      } else {
+        removeStaleButtons();
+        startToolbarSearch();
+      }
+    };
+
+    function scheduleToolbarLifecycle() {
+      if (lifecycleScheduled) return;
+      lifecycleScheduled = true;
+      Promise.resolve().then(() => {
+        lifecycleScheduled = false;
+        bindToolbarLifecycle();
       });
     }
+
+    const ROUTE_CHANGE_EVENT = "ol-tmdb-route-change";
+    ["pushState", "replaceState"].forEach((method) => {
+      const original = history[method];
+      history[method] = function (...args) {
+        const result = original.apply(this, args);
+        window.dispatchEvent(new Event(ROUTE_CHANGE_EVENT));
+        return result;
+      };
+    });
+
+    const onRouteChange = () => {
+      closeModal();
+      const path = currentOpenListPath();
+      if (path !== state.currentPath) resetDirectoryState(path);
+      scheduleToolbarLifecycle();
+      window.setTimeout(scheduleToolbarLifecycle, 50);
+      window.setTimeout(scheduleToolbarLifecycle, 250);
+    };
+
+    window.addEventListener(ROUTE_CHANGE_EVENT, onRouteChange);
+    window.addEventListener("popstate", onRouteChange);
+    window.addEventListener("hashchange", onRouteChange);
+    bodyObserver.observe(document.body, { childList: true });
+    bindToolbarLifecycle();
   })();
