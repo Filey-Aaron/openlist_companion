@@ -11,7 +11,18 @@
       rename: "openlist_tmdb_rename",
       nfo: "openlist_tmdb_nfo",
       image: "openlist_tmdb_image",
+      imageSize: "openlist_tmdb_image_size",
     };
+    const REQUEST_TIMEOUTS = {
+      tmdb: 12_000,
+      image: 30_000,
+      openListRead: 20_000,
+      openListWrite: 60_000,
+    };
+    const TMDB_RETRY_STATUSES = new Set([429, 502, 503, 504]);
+    const TMDB_MAX_RETRIES = 2;
+    const TMDB_MAX_CONCURRENCY = 5;
+    const TMDB_IMAGE_SIZES = new Set(["w780", "original"]);
     const VIDEO_EXTS = new Set([
       "mkv",
       "mp4",
@@ -48,7 +59,11 @@
       writeContentBypass: false,
       loading: false,
       directoryLoadId: 0,
+      tmdbConcurrency: TMDB_MAX_CONCURRENCY,
+      tmdbRateLimited: false,
     };
+    const tmdbSessionCache = new Map();
+    const tmdbInflightRequests = new Map();
 
     const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -517,15 +532,117 @@
       ...extra,
     });
 
+    const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+    const retryDelay = (response, attempt) => {
+      const raw = response?.headers?.get?.("retry-after")?.trim();
+      if (raw) {
+        const seconds = Number(raw);
+        if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+        const retryAt = Date.parse(raw);
+        if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+      }
+      return 500 * (2 ** attempt);
+    };
+
+    const fetchWithPolicy = async (url, options = {}, policy = {}) => {
+      const {
+        timeoutMs = REQUEST_TIMEOUTS.tmdb,
+        label = "网络",
+        maxRetries = 0,
+        retryStatuses = new Set(),
+        retryNetwork = false,
+        onResponse,
+        onRetry,
+        consume = async (response) => response,
+      } = policy;
+      const callerSignal = options.signal;
+
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        const controller = new AbortController();
+        let timedOut = false;
+        let delayMs = null;
+        const abortFromCaller = () => controller.abort(callerSignal?.reason);
+        if (callerSignal?.aborted) abortFromCaller();
+        else callerSignal?.addEventListener?.("abort", abortFromCaller, { once: true });
+        const timeoutId = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
+
+        try {
+          const response = await fetch(url, { ...options, signal: controller.signal });
+          onResponse?.(response);
+          if (retryStatuses.has(response.status) && attempt < maxRetries) {
+            delayMs = retryDelay(response, attempt);
+            onRetry?.({ attempt: attempt + 1, delayMs, status: response.status });
+            try {
+              await response.body?.cancel?.();
+            } catch {
+              // The retry is still safe if the unused response body cannot be cancelled.
+            }
+          } else {
+            const body = await consume(response);
+            return { response, body, attempts: attempt + 1 };
+          }
+        } catch (error) {
+          if (callerSignal?.aborted && !timedOut) throw error;
+          const transient = timedOut || error?.name === "AbortError" || error instanceof TypeError;
+          if (transient && retryNetwork && attempt < maxRetries) {
+            delayMs = 500 * (2 ** attempt);
+            onRetry?.({ attempt: attempt + 1, delayMs, status: null });
+          } else if (timedOut || error?.name === "AbortError") {
+            const timeoutError = new Error(`${label}请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+            timeoutError.code = "REQUEST_TIMEOUT";
+            timeoutError.cause = error;
+            throw timeoutError;
+          } else if (transient) {
+            const networkError = new Error(`${label}不可达：${error?.message || "网络连接失败"}`);
+            networkError.code = "NETWORK_UNREACHABLE";
+            networkError.cause = error;
+            throw networkError;
+          } else {
+            throw error;
+          }
+        } finally {
+          clearTimeout(timeoutId);
+          callerSignal?.removeEventListener?.("abort", abortFromCaller);
+        }
+
+        if (delayMs !== null) await sleep(delayMs);
+      }
+      throw new Error(`${label}请求失败`);
+    };
+
     const openListRequest = async (path, options = {}) => {
-      const response = await fetch(`${apiBase()}/api${path}`, {
-        ...options,
-        headers: authHeaders(options.headers || {}),
-      });
+      const {
+        timeoutMs = REQUEST_TIMEOUTS.openListRead,
+        requestLabel = "OpenList API",
+        ...requestOptions
+      } = options;
+      const { response, body } = await fetchWithPolicy(
+        `${apiBase()}/api${path}`,
+        {
+          ...requestOptions,
+          headers: authHeaders(requestOptions.headers || {}),
+        },
+        {
+          timeoutMs,
+          label: requestLabel,
+          consume: (result) => result.text(),
+        },
+      );
       const contentType = response.headers.get("content-type") || "";
-      const payload = contentType.includes("application/json")
-        ? await response.json()
-        : { code: response.status, message: await response.text() };
+      let payload;
+      if (contentType.includes("application/json")) {
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          throw new Error("OpenList API 返回了无效 JSON，可能需要适配当前版本");
+        }
+      } else {
+        payload = { code: response.status, message: body };
+      }
       if (!payload || typeof payload !== "object") {
         throw new Error("OpenList API 响应格式无效，可能需要适配当前版本");
       }
@@ -541,6 +658,8 @@
     const fsList = async (path) =>
       openListRequest("/fs/list", {
         method: "POST",
+        timeoutMs: REQUEST_TIMEOUTS.openListRead,
+        requestLabel: "OpenList 文件列表",
         headers: { "Content-Type": "application/json;charset=utf-8" },
         body: JSON.stringify({ path, password: "", page: 1, per_page: 0, refresh: false }),
       });
@@ -548,6 +667,8 @@
     const batchRename = async (srcDir, renameObjects) =>
       openListRequest("/fs/batch_rename", {
         method: "POST",
+        timeoutMs: REQUEST_TIMEOUTS.openListWrite,
+        requestLabel: "OpenList 改名",
         headers: { "Content-Type": "application/json;charset=utf-8" },
         body: JSON.stringify({
           src_dir: srcDir,
@@ -555,16 +676,33 @@
         }),
       });
 
-    const putFile = async (path, content, contentType = "application/xml;charset=utf-8") =>
-      openListRequest("/fs/put", {
-        method: "PUT",
-        headers: {
-          "Content-Type": contentType,
-          "File-Path": encodeURIComponent(path),
-          Overwrite: "true",
-        },
-        body: content,
-      });
+    const putFile = async (path, content, contentType = "application/xml;charset=utf-8") => {
+      try {
+        return await openListRequest("/fs/put", {
+          method: "PUT",
+          timeoutMs: REQUEST_TIMEOUTS.openListWrite,
+          requestLabel: "OpenList 写入",
+          headers: {
+            "Content-Type": contentType,
+            "File-Path": encodeURIComponent(path),
+            Overwrite: "true",
+          },
+          body: content,
+        });
+      } catch (error) {
+        const uploadError = new Error(`OpenList 上传失败：${error.message}`);
+        uploadError.cause = error;
+        throw uploadError;
+      }
+    };
+
+    const noteTmdbRateLimit = () => {
+      state.tmdbRateLimited = true;
+      state.tmdbConcurrency = Math.max(1, Math.floor(state.tmdbConcurrency / 2));
+    };
+
+    const tmdbConcurrencyNotice = () =>
+      state.tmdbRateLimited ? `（TMDB 限流，后续并发已降至 ${state.tmdbConcurrency}）` : "";
 
     const tmdbRequest = async (path, params = {}) => {
       const key = $(".ol-tmdb-api-key")?.value.trim();
@@ -585,19 +723,61 @@
       } else {
         url.searchParams.set("api_key", normalizedKey);
       }
+      const cacheUrl = new URL(url);
+      cacheUrl.searchParams.delete("api_key");
+      const cacheKey = cacheUrl.toString();
+      if (tmdbSessionCache.has(cacheKey)) return tmdbSessionCache.get(cacheKey);
+      if (tmdbInflightRequests.has(cacheKey)) return tmdbInflightRequests.get(cacheKey);
 
-      const response = await fetch(url, { headers });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const authMode = headers.Authorization ? "Bearer token" : "v3 api_key";
-        const detail = payload.status_message || "";
-        throw new Error(
-          detail
-            ? `TMDB ${response.status} (${authMode}): ${detail}`
-            : `TMDB ${response.status} (${authMode})`,
+      const request = (async () => {
+        const { response, body } = await fetchWithPolicy(
+          url,
+          { headers },
+          {
+            timeoutMs: REQUEST_TIMEOUTS.tmdb,
+            label: "TMDB API",
+            maxRetries: TMDB_MAX_RETRIES,
+            retryStatuses: TMDB_RETRY_STATUSES,
+            retryNetwork: true,
+            onResponse: (result) => {
+              if (result.status === 429) noteTmdbRateLimit();
+            },
+            consume: (result) => result.text(),
+          },
         );
+        let payload = {};
+        try {
+          payload = body ? JSON.parse(body) : {};
+        } catch {
+          if (response.ok) throw new Error("TMDB API 返回了无效 JSON");
+        }
+        if (!response.ok) {
+          const authMode = headers.Authorization ? "Bearer token" : "v3 api_key";
+          const detail = payload.status_message || "";
+          if (response.status === 401 || response.status === 403) {
+            throw new Error(`TMDB 鉴权失败（${authMode}）${detail ? `：${detail}` : ""}`);
+          }
+          if (response.status === 404) {
+            throw new Error(`TMDB 条目或剧集不存在${detail ? `：${detail}` : ""}`);
+          }
+          if (response.status === 400 || response.status === 422) {
+            throw new Error(`TMDB 请求参数无效${detail ? `：${detail}` : ""}`);
+          }
+          throw new Error(
+            detail
+              ? `TMDB API ${response.status} (${authMode})：${detail}`
+              : `TMDB API ${response.status} (${authMode})`,
+          );
+        }
+        tmdbSessionCache.set(cacheKey, payload);
+        return payload;
+      })();
+      tmdbInflightRequests.set(cacheKey, request);
+      try {
+        return await request;
+      } finally {
+        tmdbInflightRequests.delete(cacheKey);
       }
-      return payload;
     };
 
     const searchMovie = async (query, year) =>
@@ -630,14 +810,37 @@
     const buildImageUrl = (path, size = "w185") =>
       path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
 
+    const selectedImageSize = () => {
+      const size = $(".ol-tmdb-image-size")?.value || localStorage.getItem(STORAGE.imageSize);
+      return TMDB_IMAGE_SIZES.has(size) ? size : "w780";
+    };
+
     const fetchTmdbImage = async (imagePath, label) => {
       if (!imagePath) throw new Error(`${label}缺少图片`);
-      const response = await fetch(buildImageUrl(imagePath, "original"));
+      const { response, body } = await fetchWithPolicy(
+        buildImageUrl(imagePath, selectedImageSize()),
+        {},
+        {
+          timeoutMs: REQUEST_TIMEOUTS.image,
+          label: "TMDB 图片域名",
+          maxRetries: TMDB_MAX_RETRIES,
+          retryStatuses: TMDB_RETRY_STATUSES,
+          retryNetwork: true,
+          consume: async (result) => {
+            const contentType = (result.headers.get("content-type") || "").toLowerCase();
+            if (result.ok && !contentType.startsWith("image/")) {
+              throw new Error(
+                `${label}响应类型无效：${contentType || "缺少 Content-Type"}，已阻止上传`,
+              );
+            }
+            return result.ok
+              ? { blob: await result.blob(), contentType }
+              : { text: await result.text(), contentType };
+          },
+        },
+      );
       if (!response.ok) throw new Error(`${label}下载失败：HTTP ${response.status}`);
-      return {
-        blob: await response.blob(),
-        contentType: response.headers.get("content-type") || "image/jpeg",
-      };
+      return body;
     };
 
     const uploadPreparedImage = async (targetPath, image, label) => {
@@ -933,7 +1136,6 @@ ${studios}
     const fetchTvBatchEpisodes = async (rows = state.tvBatchRows) => {
       let success = 0;
       let failed = 0;
-      const CONCURRENCY = 5;
 
       const validRows = [];
       for (const row of rows) {
@@ -972,14 +1174,14 @@ ${studios}
       for (let i = 0; i < validRows.length; i += 1) {
         const task = fetchOne(validRows[i]).then(() => i);
         pool.set(i, task);
-        if (pool.size >= CONCURRENCY) {
+        while (pool.size >= state.tmdbConcurrency) {
           const done = await Promise.race(pool.values());
           pool.delete(done);
         }
       }
       await Promise.all(pool.values());
 
-      return { success, failed };
+      return { success, failed, concurrency: state.tmdbConcurrency };
     };
 
     const hydrateTvBatchEpisodes = async () => {
@@ -998,8 +1200,8 @@ ${studios}
         render();
         setStatus(
           result.failed
-            ? `已更新 ${result.success} 集，${result.failed} 项需要修正`
-            : `已更新 ${result.success} 集`,
+            ? `已更新 ${result.success} 集，${result.failed} 项需要修正${tmdbConcurrencyNotice()}`
+            : `已更新 ${result.success} 集${tmdbConcurrencyNotice()}`,
           result.failed ? "error" : "ok",
         );
       } finally {
@@ -1495,8 +1697,8 @@ ${studios}
           render();
           setStatus(
             result.failed
-              ? `已选择 TMDB 条目，${result.failed} 项需要修正`
-              : `已选择 TMDB 条目，已匹配 ${result.success} 集`,
+              ? `已选择 TMDB 条目，${result.failed} 项需要修正${tmdbConcurrencyNotice()}`
+              : `已选择 TMDB 条目，已匹配 ${result.success} 集${tmdbConcurrencyNotice()}`,
             result.failed ? "error" : "ok",
           );
           return;
@@ -1954,6 +2156,13 @@ ${studios}
                 <label class="ol-tmdb-check"><input class="ol-tmdb-do-rename" type="checkbox"> 改名</label>
                 <label class="ol-tmdb-check"><input class="ol-tmdb-do-nfo" type="checkbox"> 生成 / 上传 NFO</label>
                 <label class="ol-tmdb-check"><input class="ol-tmdb-do-image" type="checkbox"> 下载封面 / 缩略图</label>
+                <label class="ol-tmdb-image-size-field">
+                  <span>图片尺寸</span>
+                  <select class="ol-tmdb-select ol-tmdb-image-size">
+                    <option value="w780">适中（w780）</option>
+                    <option value="original">原图</option>
+                  </select>
+                </label>
                 <label class="ol-tmdb-check ol-tmdb-overwrite-check"><input class="ol-tmdb-overwrite" type="checkbox"> 允许覆盖已有 NFO / 图片</label>
               </div>
             </section>
@@ -2033,6 +2242,9 @@ ${studios}
       mask.querySelectorAll(".ol-tmdb-do-rename, .ol-tmdb-do-nfo, .ol-tmdb-do-image, .ol-tmdb-overwrite").forEach((input) => {
         input.addEventListener("change", renderPreview);
       });
+      $(".ol-tmdb-image-size", mask).addEventListener("change", (event) => {
+        localStorage.setItem(STORAGE.imageSize, event.target.value);
+      });
       $(".ol-tmdb-execute", mask).addEventListener("click", execute);
       mask.addEventListener("click", (event) => {
         if (event.target === mask) closeModal();
@@ -2043,6 +2255,9 @@ ${studios}
       $(".ol-tmdb-do-rename", mask).checked = localStorage.getItem(STORAGE.rename) !== "false";
       $(".ol-tmdb-do-nfo", mask).checked = localStorage.getItem(STORAGE.nfo) !== "false";
       $(".ol-tmdb-do-image", mask).checked = localStorage.getItem(STORAGE.image) === "true";
+      $(".ol-tmdb-image-size", mask).value = TMDB_IMAGE_SIZES.has(localStorage.getItem(STORAGE.imageSize))
+        ? localStorage.getItem(STORAGE.imageSize)
+        : "w780";
       updateModeUi();
     };
 
