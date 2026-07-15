@@ -69,8 +69,8 @@
 
 - [x] 每次打开模态框和执行写入前验证 URL 推导出的目录与已加载的 OpenList 目录一致。
 - [x] 目录切换后清理不再存在的文件选择、TMDB 条目和批量行状态，并丢弃晚返回的旧目录请求。
-- [ ] 操作完成后优先触发 OpenList 内部目录刷新；无法触发时继续使用 `/api/fs/list` 回读。
-- [ ] 检查 OpenList 升级后 `OPENLIST_CONFIG`、toolbar 选择器和文件 API 数据结构是否变化。
+- [x] 操作完成后优先探测并触发 OpenList 内部目录刷新；无法可靠识别时继续使用 `/api/fs/list` 回读。
+- [x] 增加 `OPENLIST_CONFIG`、toolbar 选择器和文件 API 数据结构的运行时兼容性检查与可见提示。
 
 ## P1：TMDB 请求稳定性
 

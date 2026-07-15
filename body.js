@@ -41,6 +41,7 @@
       metadataReport: null,
       executionReport: null,
       retryWriteTargets: new Set(),
+      compatibilityWarnings: [],
       mode: "movie",
       currentPath: "/",
       write: false,
@@ -50,6 +51,26 @@
     };
 
     const $ = (selector, root = document) => root.querySelector(selector);
+
+    const addCompatibilityWarning = (code, message) => {
+      if (state.compatibilityWarnings.some((warning) => warning.code === code)) return;
+      state.compatibilityWarnings.push({ code, message });
+      renderCompatibilityWarnings();
+    };
+
+    const inspectRuntimeCompatibility = () => {
+      const config = window.OPENLIST_CONFIG;
+      if (!config || typeof config !== "object") {
+        addCompatibilityWarning("config-missing", "未检测到 window.OPENLIST_CONFIG，正在使用同源默认配置。");
+        return;
+      }
+      if (config.base_path !== undefined && typeof config.base_path !== "string") {
+        addCompatibilityWarning("base-path-type", "OPENLIST_CONFIG.base_path 格式异常，已忽略该值。");
+      }
+      if (config.api !== undefined && typeof config.api !== "string") {
+        addCompatibilityWarning("api-type", "OPENLIST_CONFIG.api 格式异常，已改用当前站点地址。");
+      }
+    };
 
     const escapeXml = (value) =>
       String(value ?? "")
@@ -71,13 +92,14 @@
 
     const basePath = () => {
       const raw = window.OPENLIST_CONFIG?.base_path || "";
+      if (typeof raw !== "string") return "";
       if (!raw || raw === "/") return "";
       return raw.startsWith("/") ? trimSlashes(raw) : `/${trimSlashes(raw)}`;
     };
 
     const apiBase = () => {
       const configured = window.OPENLIST_CONFIG?.api;
-      if (configured) return trimSlashes(configured);
+      if (typeof configured === "string" && configured) return trimSlashes(configured);
       return `${location.origin}${basePath()}`;
     };
 
@@ -462,6 +484,19 @@
       $(".ol-tmdb-report-copy", node)?.addEventListener("click", copyExecutionReport);
     }
 
+    function renderCompatibilityWarnings() {
+      const node = $(".ol-tmdb-compatibility");
+      if (!node) return;
+      if (!state.compatibilityWarnings.length) {
+        node.innerHTML = "";
+        return;
+      }
+      node.innerHTML = `
+        <strong>兼容性提示</strong>
+        ${state.compatibilityWarnings.map((warning) => `<span>${escapeHtml(warning.message)}</span>`).join("")}
+      `;
+    }
+
     const setStatus = (message, kind = "") => {
       const node = $(".ol-tmdb-status");
       if (!node) return;
@@ -491,8 +526,14 @@
       const payload = contentType.includes("application/json")
         ? await response.json()
         : { code: response.status, message: await response.text() };
+      if (!payload || typeof payload !== "object") {
+        throw new Error("OpenList API 响应格式无效，可能需要适配当前版本");
+      }
       if (!response.ok || (payload.code && payload.code !== 200)) {
         throw new Error(payload.message || `OpenList API ${response.status}`);
+      }
+      if (!("data" in payload)) {
+        throw new Error("OpenList API 响应缺少 data 字段，可能需要适配当前版本");
       }
       return payload.data;
     };
@@ -1234,6 +1275,7 @@ ${studios}
       renderPreview();
       renderMetadataReport();
       renderExecutionReport();
+      renderCompatibilityWarnings();
       const executeButton = $(".ol-tmdb-execute");
       if (executeButton) executeButton.textContent = isTvBatchActive() ? "批量执行" : "执行";
     };
@@ -1309,10 +1351,26 @@ ${studios}
       if (!data || typeof data !== "object") {
         throw new Error("OpenList 文件列表响应格式无效");
       }
+      if (!("content" in data)) {
+        throw new Error("OpenList 文件列表缺少 content 字段，可能需要适配当前版本");
+      }
+      if (data.content !== null && data.content !== undefined && !Array.isArray(data.content)) {
+        throw new Error("OpenList 文件列表 content 格式异常，可能需要适配当前版本");
+      }
+      const entries = Array.isArray(data.content) ? data.content : [];
+      if (entries.some((entry) => !entry || typeof entry.name !== "string" || typeof entry.is_dir !== "boolean")) {
+        throw new Error("OpenList 文件条目格式异常，可能需要适配当前版本");
+      }
+      if (!("write" in data)) {
+        addCompatibilityWarning("fs-list-write", "文件列表响应缺少 write 字段，写入操作将保持禁用。");
+      }
+      if (!("write_content_bypass" in data)) {
+        addCompatibilityWarning("fs-list-write-bypass", "文件列表响应缺少 write_content_bypass 字段，权限提示可能不完整。");
+      }
       state.currentPath = requestedPath;
       state.write = Boolean(data.write);
       state.writeContentBypass = Boolean(data.write_content_bypass);
-      state.entries = Array.isArray(data.content) ? data.content : [];
+      state.entries = entries;
       state.files = state.entries.filter(isVideo);
       const savedMode = localStorage.getItem(STORAGE.mode);
       state.mode = savedMode === "movie" || savedMode === "tv" ? savedMode : inferMode(state.files);
@@ -1345,6 +1403,46 @@ ${studios}
       render();
       setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
       return true;
+    };
+
+    const findOpenListRefreshControl = () => {
+      const toolbar = $(".left-toolbar-in") || $(".left-toolbar");
+      if (!toolbar) return null;
+      const selectors = [
+        ".toolbar-refresh",
+        '[data-tool="refresh"]',
+        '[tips="refresh"]',
+        '[aria-label="refresh"]',
+        '[aria-label="Refresh"]',
+        '[aria-label="刷新"]',
+      ];
+      for (const selector of selectors) {
+        const candidate = $(selector, toolbar);
+        if (candidate && !candidate.closest?.(".ol-tmdb-button-wrap")) return candidate;
+      }
+      return null;
+    };
+
+    const triggerOpenListRefresh = () => {
+      const control = findOpenListRefreshControl();
+      if (!control || typeof control.click !== "function") {
+        if ($(".left-toolbar-in") || $(".left-toolbar")) {
+          addCompatibilityWarning("refresh-control", "无法识别 OpenList 内部刷新按钮，操作后仅使用文件 API 回读。");
+        }
+        return false;
+      }
+      try {
+        control.click();
+        return true;
+      } catch {
+        addCompatibilityWarning("refresh-control-click", "OpenList 内部刷新按钮触发失败，已改用文件 API 回读。");
+        return false;
+      }
+    };
+
+    const refreshFilesAfterMutation = async (preferredName = "") => {
+      triggerOpenListRefresh();
+      return loadFiles(preferredName);
     };
 
     const runMetadataCheck = () => {
@@ -1582,7 +1680,11 @@ ${studios}
           state.results = [];
           state.tvBatchRows = [];
         }
-        await loadFiles(failedNames[0] || "");
+        if (reportSummary.success) {
+          await refreshFilesAfterMutation(failedNames[0] || "");
+        } else {
+          await loadFiles(failedNames[0] || "");
+        }
         if (failedRows.length === 1) {
           const seasonInput = $(".ol-tmdb-season");
           const episodeInput = $(".ol-tmdb-episode");
@@ -1738,7 +1840,11 @@ ${studios}
         state.selectedItem = null;
         state.selectedEpisode = null;
         state.results = [];
-        await loadFiles(nextName);
+        if (reportSummary.success) {
+          await refreshFilesAfterMutation(nextName);
+        } else {
+          await loadFiles(nextName);
+        }
         setStatus(
           nextName
             ? `${messages.join("，")}。步骤成功 ${reportSummary.success}，跳过 ${reportSummary.skipped}，覆盖 ${reportSummary.overwrite}。已自动选中下一项：${nextName}`
@@ -1757,7 +1863,11 @@ ${studios}
         const overwrite = $(".ol-tmdb-overwrite");
         if (overwrite) overwrite.checked = false;
         try {
-          await loadFiles(actualName);
+          if (activeStep || actualName !== oldName) {
+            await refreshFilesAfterMutation(actualName);
+          } else {
+            await loadFiles(actualName);
+          }
           setStatus(`${error.message}。已重新读取目录并定位当前文件`, "error");
         } catch (reloadError) {
           setStatus(`${error.message}；重新读取目录失败：${reloadError.message}`, "error");
@@ -1797,6 +1907,7 @@ ${studios}
                 <button class="ol-tmdb-action ol-tmdb-reload" type="button">刷新文件</button>
                 <button class="ol-tmdb-action ol-tmdb-audit-run" type="button">元数据检查</button>
               </div>
+              <div class="ol-tmdb-compatibility"></div>
               <div class="ol-tmdb-list">
                 <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
                 <div class="ol-tmdb-files"></div>
@@ -2131,5 +2242,6 @@ ${studios}
     window.addEventListener("popstate", onRouteChange);
     window.addEventListener("hashchange", onRouteChange);
     bodyObserver.observe(document.body, { childList: true });
+    inspectRuntimeCompatibility();
     bindToolbarLifecycle();
   })();

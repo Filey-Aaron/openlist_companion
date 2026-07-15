@@ -446,6 +446,21 @@
     gap: 8px;
   }
 
+  .ol-tmdb-compatibility {
+    display: grid;
+    gap: 3px;
+    border: 1px solid var(--hope-colors-warning7, #d89614);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--hope-colors-warning7, #d89614) 8%, transparent);
+    color: var(--hope-colors-warning11, #613400);
+    font-size: 12px;
+  }
+
+  .ol-tmdb-compatibility:empty {
+    display: none;
+  }
+
   .ol-tmdb-audit:empty {
     display: none;
   }
