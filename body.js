@@ -57,6 +57,9 @@
       currentPath: "/",
       write: false,
       writeContentBypass: false,
+      userPermission: null,
+      permissionLoaded: false,
+      permissionToken: null,
       loading: false,
       directoryLoadId: 0,
       tmdbConcurrency: TMDB_MAX_CONCURRENCY,
@@ -70,6 +73,13 @@
     const addCompatibilityWarning = (code, message) => {
       if (state.compatibilityWarnings.some((warning) => warning.code === code)) return;
       state.compatibilityWarnings.push({ code, message });
+      renderCompatibilityWarnings();
+    };
+
+    const removeCompatibilityWarning = (code) => {
+      const next = state.compatibilityWarnings.filter((warning) => warning.code !== code);
+      if (next.length === state.compatibilityWarnings.length) return;
+      state.compatibilityWarnings = next;
       renderCompatibilityWarnings();
     };
 
@@ -281,12 +291,50 @@
       return false;
     };
 
-    const actionOptions = () => ({
-      rename: Boolean($(".ol-tmdb-do-rename")?.checked),
-      nfo: Boolean($(".ol-tmdb-do-nfo")?.checked),
-      image: Boolean($(".ol-tmdb-do-image")?.checked),
-      overwrite: Boolean($(".ol-tmdb-overwrite")?.checked),
-    });
+    const userCan = (bit) =>
+      Number.isInteger(state.userPermission) && ((state.userPermission >> bit) & 1) === 1;
+
+    const operationCapabilities = () => {
+      const permissionKnown = Number.isInteger(state.userPermission);
+      const directoryWrite = state.write;
+      const rename = directoryWrite && (!permissionKnown || userCan(4));
+      const upload = directoryWrite && (
+        state.writeContentBypass || !permissionKnown || userCan(3)
+      );
+      return {
+        permissionKnown,
+        directoryWrite,
+        rename,
+        upload,
+        renameReason: !directoryWrite
+          ? "当前目录不允许该用户写入"
+          : permissionKnown && !userCan(4)
+            ? "当前用户缺少 rename 权限"
+            : "",
+        uploadReason: !directoryWrite
+          ? "当前目录不允许该用户写入"
+          : permissionKnown && !state.writeContentBypass && !userCan(3)
+            ? "当前用户缺少 write_content 权限，目录也未启用绕过"
+            : "",
+      };
+    };
+
+    const actionOptions = () => {
+      const capabilities = operationCapabilities();
+      return {
+        rename: capabilities.rename && Boolean($(".ol-tmdb-do-rename")?.checked),
+        nfo: capabilities.upload && Boolean($(".ol-tmdb-do-nfo")?.checked),
+        image: capabilities.upload && Boolean($(".ol-tmdb-do-image")?.checked),
+        overwrite: Boolean($(".ol-tmdb-overwrite")?.checked),
+      };
+    };
+
+    const noAvailableActionMessage = () => {
+      const capabilities = operationCapabilities();
+      return !capabilities.rename && !capabilities.upload
+        ? "当前权限仅允许只读操作；仍可搜索、预览和检查元数据"
+        : "请至少选择一个当前可用的操作";
+    };
 
     const findEntry = (name, ignoreName = "") => {
       const normalized = normalizeName(name);
@@ -512,6 +560,45 @@
       `;
     }
 
+    function renderPermissionSummary() {
+      const node = $(".ol-tmdb-permissions");
+      if (!node) return;
+      const capabilities = operationCapabilities();
+      const permissionNote = capabilities.permissionKnown
+        ? state.writeContentBypass
+          ? "目录允许绕过用户的 write_content 权限"
+          : "已读取当前用户权限"
+        : "未能确认用户权限，操作将由服务端最终判断";
+      node.dataset.kind = capabilities.rename || capabilities.upload ? "" : "readonly";
+      node.innerHTML = `
+        <strong>${capabilities.rename || capabilities.upload ? "可用写入能力" : "只读模式"}</strong>
+        <span data-allowed="${capabilities.rename}">改名：${capabilities.rename ? "可用" : escapeHtml(capabilities.renameReason)}</span>
+        <span data-allowed="${capabilities.upload}">NFO / 图片：${capabilities.upload ? "可用" : escapeHtml(capabilities.uploadReason)}</span>
+        <small>${escapeHtml(permissionNote)}；TMDB 搜索、预览和元数据检查始终可用。</small>
+      `;
+    }
+
+    const updatePermissionControls = () => {
+      const capabilities = operationCapabilities();
+      const update = (selector, allowed, reason) => {
+        const input = $(selector);
+        if (!input) return;
+        input.disabled = state.loading || !allowed;
+        const label = input.closest?.("label");
+        if (label) {
+          label.dataset.permissionDisabled = String(!allowed);
+          label.title = allowed ? "" : reason;
+        }
+      };
+      update(".ol-tmdb-do-rename", capabilities.rename, capabilities.renameReason);
+      update(".ol-tmdb-do-nfo", capabilities.upload, capabilities.uploadReason);
+      update(".ol-tmdb-do-image", capabilities.upload, capabilities.uploadReason);
+      update(".ol-tmdb-overwrite", capabilities.upload, capabilities.uploadReason);
+      const imageSize = $(".ol-tmdb-image-size");
+      if (imageSize) imageSize.disabled = state.loading || !capabilities.upload;
+      renderPermissionSummary();
+    };
+
     const setStatus = (message, kind = "") => {
       const node = $(".ol-tmdb-status");
       if (!node) return;
@@ -525,6 +612,7 @@
         if (el.dataset.keepEnabled === "true") return;
         el.disabled = busy;
       });
+      if (!busy) updatePermissionControls();
     };
 
     const authHeaders = (extra = {}) => ({
@@ -653,6 +741,36 @@
         throw new Error("OpenList API 响应缺少 data 字段，可能需要适配当前版本");
       }
       return payload.data;
+    };
+
+    const loadCurrentUserPermissions = async () => {
+      const token = localStorage.getItem("token") || "";
+      if (state.permissionLoaded && state.permissionToken === token) return;
+      state.permissionLoaded = false;
+      state.permissionToken = token;
+      state.userPermission = null;
+      try {
+        const user = await openListRequest("/me", {
+          method: "GET",
+          timeoutMs: 10_000,
+          requestLabel: "OpenList 当前用户",
+        });
+        if (state.permissionToken !== token) return;
+        if (!user || !Number.isInteger(user.permission)) {
+          throw new Error("当前用户响应缺少 permission 字段");
+        }
+        state.userPermission = user.permission;
+        state.permissionLoaded = true;
+        removeCompatibilityWarning("user-permission");
+      } catch (error) {
+        if (state.permissionToken !== token) return;
+        state.userPermission = null;
+        state.permissionLoaded = true;
+        addCompatibilityWarning(
+          "user-permission",
+          `无法确认当前用户权限（${error.message}）；目录允许的写入选项保持可用，并由服务端最终判断。`,
+        );
+      }
     };
 
     const fsList = async (path) =>
@@ -1478,6 +1596,7 @@ ${studios}
       renderMetadataReport();
       renderExecutionReport();
       renderCompatibilityWarnings();
+      updatePermissionControls();
       const executeButton = $(".ol-tmdb-execute");
       if (executeButton) executeButton.textContent = isTvBatchActive() ? "批量执行" : "执行";
     };
@@ -1546,7 +1665,10 @@ ${studios}
       const requestedPath = currentOpenListPath();
       const loadId = state.directoryLoadId + 1;
       state.directoryLoadId = loadId;
-      const data = await fsList(requestedPath);
+      const [data] = await Promise.all([
+        fsList(requestedPath),
+        loadCurrentUserPermissions(),
+      ]);
       if (loadId !== state.directoryLoadId || requestedPath !== currentOpenListPath()) {
         return false;
       }
@@ -1603,7 +1725,15 @@ ${studios}
       if (state.selectedName) hydrateSearchFromFile();
       state.metadataReport = null;
       render();
-      setStatus(state.write ? `已载入 ${state.files.length} 个视频文件` : "当前目录可能没有写权限", state.write ? "" : "error");
+      const capabilities = operationCapabilities();
+      if (!capabilities.rename && !capabilities.upload) {
+        setStatus(`已以只读模式载入 ${state.files.length} 个视频文件；仍可搜索、预览和检查元数据`);
+      } else {
+        const available = [capabilities.rename && "改名", capabilities.upload && "NFO / 图片"]
+          .filter(Boolean)
+          .join("、");
+        setStatus(`已载入 ${state.files.length} 个视频文件；可用写入能力：${available}`);
+      }
       return true;
     };
 
@@ -1731,11 +1861,7 @@ ${studios}
       }
       const options = actionOptions();
       if (!options.rename && !options.nfo && !options.image) {
-        setStatus("请至少选择一个操作", "error");
-        return;
-      }
-      if (!state.write) {
-        setStatus("当前目录没有写权限，无法执行", "error");
+        setStatus(noAvailableActionMessage(), "error");
         return;
       }
       const invalidRows = state.tvBatchRows.filter((row) => !positiveNumber(row.season) || !positiveNumber(row.episode));
@@ -1935,11 +2061,7 @@ ${studios}
       }
       const options = actionOptions();
       if (!options.rename && !options.nfo && !options.image) {
-        setStatus("请至少选择一个操作", "error");
-        return;
-      }
-      if (!state.write) {
-        setStatus("当前目录没有写权限，无法执行", "error");
+        setStatus(noAvailableActionMessage(), "error");
         return;
       }
 
@@ -2110,6 +2232,7 @@ ${studios}
                 <button class="ol-tmdb-action ol-tmdb-audit-run" type="button">元数据检查</button>
               </div>
               <div class="ol-tmdb-compatibility"></div>
+              <div class="ol-tmdb-permissions"></div>
               <div class="ol-tmdb-list">
                 <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
                 <div class="ol-tmdb-files"></div>

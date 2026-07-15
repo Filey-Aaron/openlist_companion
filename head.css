@@ -475,6 +475,41 @@
     display: none;
   }
 
+  .ol-tmdb-permissions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+    border: 1px solid var(--hope-colors-neutral5, #e8e8e8);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: var(--hope-colors-neutral2, #fafafa);
+    font-size: 12px;
+  }
+
+  .ol-tmdb-permissions strong,
+  .ol-tmdb-permissions small {
+    flex-basis: 100%;
+  }
+
+  .ol-tmdb-permissions span[data-allowed="true"] {
+    color: var(--hope-colors-success9, #237804);
+  }
+
+  .ol-tmdb-permissions span[data-allowed="false"],
+  .ol-tmdb-permissions[data-kind="readonly"] strong {
+    color: var(--hope-colors-warning10, #874d00);
+  }
+
+  .ol-tmdb-permissions small {
+    color: var(--hope-colors-neutral10, #777);
+  }
+
+  .ol-tmdb-check[data-permission-disabled="true"] {
+    opacity: 0.58;
+    cursor: not-allowed;
+  }
+
   .ol-tmdb-audit:empty {
     display: none;
   }
