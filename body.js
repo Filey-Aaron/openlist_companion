@@ -1078,6 +1078,98 @@ ${studios}
       return { text: row.parsed ? "待更新" : "已手动填写，待更新", kind: "" };
     };
 
+    const normalizeSeriesTitle = (value) =>
+      String(value || "")
+        .normalize("NFKC")
+        .replace(/\[[^\]]*]/g, " ")
+        .replace(/\b(?:19|20)\d{2}\b/g, " ")
+        .replace(/\b(?:season|s)\s*\d+\b/gi, " ")
+        .replace(/第\s*\d+\s*季/g, " ")
+        .replace(/[^\p{L}\p{N}]+/gu, "")
+        .toLowerCase();
+
+    const batchRowSuspicion = (row) => {
+      if (!state.selectedItem) return "";
+      const parsedTitle = parseEpisodeName(row.name)?.title || "";
+      const candidate = normalizeSeriesTitle(parsedTitle);
+      if (candidate.length < 2) return "";
+      const references = [
+        itemDisplayTitle(state.selectedItem),
+        state.selectedItem.original_name,
+        currentDirectoryTitle(),
+      ]
+        .map(normalizeSeriesTitle)
+        .filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
+      const matches = references.some((reference) =>
+        candidate.includes(reference) || reference.includes(candidate)
+      );
+      return matches ? "" : `文件标题“${parsedTitle}”与所选条目疑似不一致`;
+    };
+
+    const batchOverview = (rows = state.tvBatchRows) => {
+      const episodes = rows
+        .map((row) => ({ season: positiveNumber(row.season), episode: positiveNumber(row.episode) }))
+        .filter((item) => item.season && item.episode)
+        .sort((a, b) => a.season - b.season || a.episode - b.episode);
+      const seasons = new Set(episodes.map((item) => item.season));
+      const first = episodes[0];
+      const last = episodes.at(-1);
+      const range = !first
+        ? "待填写"
+        : first.season === last.season && first.episode === last.episode
+          ? tvEpisodeCode(first.season, first.episode)
+          : `${tvEpisodeCode(first.season, first.episode)}–${tvEpisodeCode(last.season, last.episode)}`;
+      const suspiciousRows = rows.filter((row) => batchRowSuspicion(row));
+      return {
+        selected: rows.length,
+        seasonCount: seasons.size,
+        range,
+        unparsed: rows.filter((row) => !row.parsed).length,
+        suspiciousRows,
+      };
+    };
+
+    const batchFillDefaults = (rows = state.tvBatchRows) => ({
+      season: positiveNumber(rows[0]?.season) || 1,
+      episode: positiveNumber(rows[0]?.episode) || 1,
+    });
+
+    const renderBatchOverview = (rows = state.tvBatchRows) => {
+      const overview = batchOverview(rows);
+      const defaults = batchFillDefaults(rows);
+      const selectedTitle = state.selectedItem ? itemDisplayTitle(state.selectedItem) : "";
+      const suspiciousNames = overview.suspiciousRows.slice(0, 3).map((row) => row.name);
+      return `
+        <div class="ol-tmdb-batch-overview">
+          <div class="ol-tmdb-batch-confirmation">
+            <strong>同一 TMDB 条目约束</strong>
+            <span>${selectedTitle
+              ? `以下 ${overview.selected} 个文件将全部使用“${escapeHtml(selectedTitle)}”这一条电视剧记录。`
+              : `这 ${overview.selected} 个文件必须共用同一个 TMDB 电视剧条目，请确认选择中没有混入其他剧集。`}</span>
+          </div>
+          <div class="ol-tmdb-batch-summary">
+            <span>文件：${overview.selected}</span>
+            <span>季数：${overview.seasonCount || "待填写"}</span>
+            <span>范围：${escapeHtml(overview.range)}</span>
+            <span>无法解析：${overview.unparsed}</span>
+            <span>疑似异剧集：${overview.suspiciousRows.length}</span>
+          </div>
+          ${overview.suspiciousRows.length ? `
+            <div class="ol-tmdb-batch-suspicion">
+              <strong>非阻断提示：</strong>
+              <span>${escapeHtml(suspiciousNames.join("；"))}${overview.suspiciousRows.length > suspiciousNames.length ? `；另 ${overview.suspiciousRows.length - suspiciousNames.length} 个` : ""}</span>
+            </div>
+          ` : ""}
+          <div class="ol-tmdb-batch-fill">
+            <span>按当前文件顺序覆盖填充</span>
+            <label>季 <input class="ol-tmdb-input ol-tmdb-fill-season" type="text" inputmode="numeric" value="${defaults.season}"></label>
+            <label>起始集 <input class="ol-tmdb-input ol-tmdb-fill-episode" type="text" inputmode="numeric" value="${defaults.episode}"></label>
+            <button class="ol-tmdb-action ol-tmdb-fill-sequential" type="button">连续填充</button>
+          </div>
+        </div>
+      `;
+    };
+
     const batchRowTarget = (row) => {
       const file = state.files.find((item) => item.name === row.name);
       const season = positiveNumber(row.season);
@@ -1249,6 +1341,34 @@ ${studios}
       row.episodeDetails = null;
       row.error = "";
       row.result = "";
+    };
+
+    const fillSequentialEpisodes = (season, firstEpisode) => {
+      const normalizedSeason = positiveNumber(season);
+      const normalizedEpisode = positiveNumber(firstEpisode);
+      if (!normalizedSeason || !normalizedEpisode) return false;
+      state.tvBatchRows.forEach((row, index) => {
+        row.season = normalizedSeason;
+        row.episode = normalizedEpisode + index;
+        row.episodeDetails = null;
+        row.error = "";
+        row.result = "";
+      });
+      return true;
+    };
+
+    const bindBatchOverviewActions = (preview) => {
+      $(".ol-tmdb-fill-sequential", preview)?.addEventListener("click", () => {
+        const season = $(".ol-tmdb-fill-season", preview)?.value;
+        const episode = $(".ol-tmdb-fill-episode", preview)?.value;
+        if (!fillSequentialEpisodes(season, episode)) {
+          setStatus("连续填充需要有效的季和起始集", "error");
+          return;
+        }
+        const count = state.tvBatchRows.length;
+        renderPreview();
+        setStatus(`已按文件顺序填充 ${count} 集；请检查后更新逐集预览`, "ok");
+      });
     };
 
     const fetchTvBatchEpisodes = async (rows = state.tvBatchRows) => {
@@ -1500,12 +1620,17 @@ ${studios}
         return;
       }
       if (!state.selectedItem) {
-        preview.innerHTML = `已选择 ${state.selectedNames.length} 集，请先选择 TMDB 电视剧条目`;
+        preview.innerHTML = `
+          ${renderBatchOverview(state.tvBatchRows)}
+          <div class="ol-tmdb-batch-select-hint">已选择 ${state.selectedNames.length} 个文件，请搜索并选择一个 TMDB 电视剧条目。</div>
+        `;
+        bindBatchOverviewActions(preview);
         return;
       }
       const rows = state.tvBatchRows;
       const plan = buildBatchExecutionPlan();
       preview.innerHTML = `
+        ${renderBatchOverview(rows)}
         <div class="ol-tmdb-preview-head">
           <div>
             <strong>逐集预览</strong>
@@ -1531,7 +1656,11 @@ ${studios}
             const status = planError
               ? { text: planError.text, kind: "error" }
               : batchRowStatus(row);
-            return `<div class="ol-tmdb-batch-row" data-kind="${escapeHtml(status.kind)}">
+            const suspicion = batchRowSuspicion(row);
+            const displayStatus = suspicion && status.kind !== "error"
+              ? { text: `${suspicion}；${status.text}`, kind: "warn" }
+              : status;
+            return `<div class="ol-tmdb-batch-row" data-kind="${escapeHtml(displayStatus.kind)}">
               <span class="ol-tmdb-code" title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</span>
               <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="season" type="text" inputmode="numeric" value="${escapeHtml(row.season)}">
               <input class="ol-tmdb-input ol-tmdb-batch-input" data-name="${escapeHtml(row.name)}" data-field="episode" type="text" inputmode="numeric" value="${escapeHtml(row.episode)}">
@@ -1540,11 +1669,12 @@ ${studios}
                 ${target.videoName ? `${escapeHtml(target.videoName)}<br><span class="ol-tmdb-meta">${escapeHtml(target.nfoName)} · ${escapeHtml(target.imageName)}</span>` : "待填写"}
                 ${rowPlan ? `<span class="ol-tmdb-plan">${rowPlan.steps.map(renderPlanStep).join("")}</span>` : ""}
               </span>
-              <span class="ol-tmdb-batch-status">${escapeHtml(status.text)}</span>
+              <span class="ol-tmdb-batch-status">${escapeHtml(displayStatus.text)}</span>
             </div>`;
           }).join("")}
         </div>
       `;
+      bindBatchOverviewActions(preview);
       $(".ol-tmdb-update-batch", preview)?.addEventListener("click", hydrateTvBatchEpisodes);
       preview.querySelectorAll(".ol-tmdb-batch-input").forEach((input) => {
         input.addEventListener("change", () => {
