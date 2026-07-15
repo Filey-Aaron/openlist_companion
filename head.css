@@ -154,7 +154,8 @@
     display: none;
   }
 
-  .ol-tmdb-report-copy {
+  .ol-tmdb-report-copy,
+  .ol-tmdb-report-retry {
     border: 0;
     padding: 0;
     background: transparent;
@@ -239,6 +240,18 @@
     width: auto;
     min-height: 30px;
     padding-block: 4px;
+  }
+
+  .ol-tmdb-operation-quick {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .ol-tmdb-operation-quick .ol-tmdb-action {
+    min-height: 30px;
+    padding: 4px 8px;
+    font-size: 12px;
   }
 
   .ol-tmdb-overwrite-check {

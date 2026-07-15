@@ -11,7 +11,9 @@
       rename: "openlist_tmdb_rename",
       nfo: "openlist_tmdb_nfo",
       image: "openlist_tmdb_image",
+      overwrite: "openlist_tmdb_overwrite",
       imageSize: "openlist_tmdb_image_size",
+      concurrency: "openlist_tmdb_concurrency",
     };
     const REQUEST_TIMEOUTS = {
       tmdb: 12_000,
@@ -22,7 +24,12 @@
     const TMDB_RETRY_STATUSES = new Set([429, 502, 503, 504]);
     const TMDB_MAX_RETRIES = 2;
     const TMDB_MAX_CONCURRENCY = 5;
+    const TMDB_CONCURRENCY_OPTIONS = new Set([1, 3, 5]);
     const TMDB_IMAGE_SIZES = new Set(["w780", "original"]);
+    const savedTmdbConcurrency = Number(localStorage.getItem(STORAGE.concurrency));
+    const initialTmdbConcurrency = TMDB_CONCURRENCY_OPTIONS.has(savedTmdbConcurrency)
+      ? savedTmdbConcurrency
+      : TMDB_MAX_CONCURRENCY;
     const VIDEO_EXTS = new Set([
       "mkv",
       "mp4",
@@ -62,7 +69,8 @@
       permissionToken: null,
       loading: false,
       directoryLoadId: 0,
-      tmdbConcurrency: TMDB_MAX_CONCURRENCY,
+      tmdbConcurrencyLimit: initialTmdbConcurrency,
+      tmdbConcurrency: initialTmdbConcurrency,
       tmdbRateLimited: false,
     };
     const tmdbSessionCache = new Map();
@@ -457,6 +465,7 @@
           .map((step) => ({
             id: step.id,
             file: sourceByStep.get(step.id) || state.currentPath,
+            type: step.type,
             step: step.label,
             target: step.name,
             plannedStatus: step.status,
@@ -531,6 +540,43 @@
       }
     };
 
+    const setOperationSelection = (types) => {
+      const mappings = [
+        ["rename", ".ol-tmdb-do-rename", STORAGE.rename],
+        ["nfo", ".ol-tmdb-do-nfo", STORAGE.nfo],
+        ["image", ".ol-tmdb-do-image", STORAGE.image],
+      ];
+      mappings.forEach(([type, selector, storageKey]) => {
+        const input = $(selector);
+        if (!input) return;
+        input.checked = types.has(type);
+        localStorage.setItem(storageKey, input.checked ? "true" : "false");
+      });
+      updatePermissionControls();
+      renderPreview();
+    };
+
+    const prepareFailedRetry = () => {
+      const failedEntries = state.executionReport?.entries.filter((entry) =>
+        entry.status === "failed" || entry.status === "not-run"
+      ) || [];
+      const types = new Set();
+      failedEntries.forEach((entry) => {
+        if (entry.type === "rename") types.add("rename");
+        if (entry.type === "nfo") types.add("nfo");
+        if (entry.type === "image" || entry.type === "poster") types.add("image");
+      });
+      if (!types.size) {
+        setStatus("报告中没有可恢复的失败或未执行写入步骤", "error");
+        return;
+      }
+      setOperationSelection(types);
+      const labels = [types.has("rename") && "改名", types.has("nfo") && "NFO", types.has("image") && "图片"]
+        .filter(Boolean)
+        .join("、");
+      setStatus(`已仅选择失败 / 未执行步骤类型：${labels}；请核对执行计划后再次执行`, "ok");
+    };
+
     function renderExecutionReport() {
       const node = $(".ol-tmdb-execution-report");
       if (!node) return;
@@ -540,10 +586,13 @@
         return;
       }
       const summary = report.summary || executionReportSummary(report);
+      const retryable = report.entries.some((entry) => entry.status === "failed" || entry.status === "not-run");
       node.innerHTML = `
         <span>步骤：成功 ${summary.success} · 失败 ${summary.failed} · 跳过 / 未执行 ${summary.skipped} · 覆盖 ${summary.overwrite}</span>
+        ${retryable ? '<button class="ol-tmdb-report-retry" type="button">准备重试失败 / 未执行步骤</button>' : ""}
         ${summary.failed ? '<button class="ol-tmdb-report-copy" type="button">复制失败明细</button>' : ""}
       `;
+      $(".ol-tmdb-report-retry", node)?.addEventListener("click", prepareFailedRetry);
       $(".ol-tmdb-report-copy", node)?.addEventListener("click", copyExecutionReport);
     }
 
@@ -596,6 +645,16 @@
       update(".ol-tmdb-overwrite", capabilities.upload, capabilities.uploadReason);
       const imageSize = $(".ol-tmdb-image-size");
       if (imageSize) imageSize.disabled = state.loading || !capabilities.upload;
+      document.querySelectorAll("[data-only-operation]").forEach((button) => {
+        const type = button.dataset.onlyOperation;
+        const allowed = type === "rename" ? capabilities.rename : capabilities.upload;
+        button.disabled = state.loading || !allowed;
+        button.title = allowed
+          ? ""
+          : type === "rename"
+            ? capabilities.renameReason
+            : capabilities.uploadReason;
+      });
       renderPermissionSummary();
     };
 
@@ -2125,23 +2184,24 @@ ${studios}
         const failedRows = state.tvBatchRows.filter((row) => row.error);
         const failedNames = failedRows.map((row) => row.name);
         const finalFailed = failedNames.length;
+        const retainedNames = finalFailed
+          ? failedNames
+          : posterError
+            ? state.tvBatchRows.map((row) => row.name)
+            : [];
         const reportSummary = finishExecutionReport(report);
-        if (finalFailed || posterError) {
-          const overwrite = $(".ol-tmdb-overwrite");
-          if (overwrite) overwrite.checked = false;
-        }
-        state.selectedNames = failedNames;
-        state.selectedName = failedNames[0] || "";
+        state.selectedNames = retainedNames;
+        state.selectedName = retainedNames[0] || "";
         state.selectedEpisode = failedRows.length === 1 ? failedRows[0].episodeDetails : null;
-        if (!failedNames.length) {
+        if (!retainedNames.length) {
           state.selectedItem = null;
           state.results = [];
           state.tvBatchRows = [];
         }
         if (reportSummary.success) {
-          await refreshFilesAfterMutation(failedNames[0] || "");
+          await refreshFilesAfterMutation(retainedNames[0] || "");
         } else {
-          await loadFiles(failedNames[0] || "");
+          await loadFiles(retainedNames[0] || "");
         }
         if (failedRows.length === 1) {
           const seasonInput = $(".ol-tmdb-season");
@@ -2162,8 +2222,6 @@ ${studios}
         const failedSteps = error.planStep ? [error.planStep] : activeSteps;
         failedSteps.forEach((step) => updateExecutionReport(report, step, "failed", error.message));
         finishExecutionReport(report);
-        const overwrite = $(".ol-tmdb-overwrite");
-        if (overwrite) overwrite.checked = false;
         setStatus(error.message, "error");
       } finally {
         setBusy(false);
@@ -2314,8 +2372,6 @@ ${studios}
           updateExecutionReport(report, failedStep, "failed", error.message);
         }
         finishExecutionReport(report);
-        const overwrite = $(".ol-tmdb-overwrite");
-        if (overwrite) overwrite.checked = false;
         try {
           if (activeStep || actualName !== oldName) {
             await refreshFilesAfterMutation(actualName);
@@ -2416,7 +2472,20 @@ ${studios}
                     <option value="original">原图</option>
                   </select>
                 </label>
+                <label class="ol-tmdb-image-size-field ol-tmdb-tv-only">
+                  <span>批量并发</span>
+                  <select class="ol-tmdb-select ol-tmdb-concurrency">
+                    <option value="1">1</option>
+                    <option value="3">3</option>
+                    <option value="5">5</option>
+                  </select>
+                </label>
                 <label class="ol-tmdb-check ol-tmdb-overwrite-check"><input class="ol-tmdb-overwrite" type="checkbox"> 允许覆盖已有 NFO / 图片</label>
+                <span class="ol-tmdb-operation-quick">
+                  <button class="ol-tmdb-action" type="button" data-only-operation="rename">仅改名</button>
+                  <button class="ol-tmdb-action" type="button" data-only-operation="nfo">仅 NFO</button>
+                  <button class="ol-tmdb-action" type="button" data-only-operation="image">仅图片</button>
+                </span>
               </div>
             </section>
           </main>
@@ -2492,11 +2561,39 @@ ${studios}
       $(".ol-tmdb-year", mask).addEventListener("keydown", (event) => {
         if (event.key === "Enter") doSearch();
       });
+      const optionStorage = new Map([
+        ["ol-tmdb-do-rename", STORAGE.rename],
+        ["ol-tmdb-do-nfo", STORAGE.nfo],
+        ["ol-tmdb-do-image", STORAGE.image],
+        ["ol-tmdb-overwrite", STORAGE.overwrite],
+      ]);
       mask.querySelectorAll(".ol-tmdb-do-rename, .ol-tmdb-do-nfo, .ol-tmdb-do-image, .ol-tmdb-overwrite").forEach((input) => {
-        input.addEventListener("change", renderPreview);
+        input.addEventListener("change", () => {
+          const storageKey = [...input.classList]
+            .map((className) => optionStorage.get(className))
+            .find(Boolean);
+          if (storageKey) localStorage.setItem(storageKey, input.checked ? "true" : "false");
+          renderPreview();
+        });
+      });
+      mask.querySelectorAll("[data-only-operation]").forEach((button) => {
+        button.addEventListener("click", () => {
+          setOperationSelection(new Set([button.dataset.onlyOperation]));
+          const label = { rename: "改名", nfo: "NFO", image: "图片" }[button.dataset.onlyOperation];
+          setStatus(`已切换为仅 ${label}`);
+        });
       });
       $(".ol-tmdb-image-size", mask).addEventListener("change", (event) => {
         localStorage.setItem(STORAGE.imageSize, event.target.value);
+      });
+      $(".ol-tmdb-concurrency", mask).addEventListener("change", (event) => {
+        const concurrency = Number(event.target.value);
+        if (!TMDB_CONCURRENCY_OPTIONS.has(concurrency)) return;
+        state.tmdbConcurrencyLimit = concurrency;
+        state.tmdbConcurrency = concurrency;
+        state.tmdbRateLimited = false;
+        localStorage.setItem(STORAGE.concurrency, String(concurrency));
+        setStatus(`批量 TMDB 请求并发已设为 ${concurrency}`);
       });
       $(".ol-tmdb-execute", mask).addEventListener("click", execute);
       mask.addEventListener("click", (event) => {
@@ -2508,9 +2605,11 @@ ${studios}
       $(".ol-tmdb-do-rename", mask).checked = localStorage.getItem(STORAGE.rename) !== "false";
       $(".ol-tmdb-do-nfo", mask).checked = localStorage.getItem(STORAGE.nfo) !== "false";
       $(".ol-tmdb-do-image", mask).checked = localStorage.getItem(STORAGE.image) === "true";
+      $(".ol-tmdb-overwrite", mask).checked = localStorage.getItem(STORAGE.overwrite) === "true";
       $(".ol-tmdb-image-size", mask).value = TMDB_IMAGE_SIZES.has(localStorage.getItem(STORAGE.imageSize))
         ? localStorage.getItem(STORAGE.imageSize)
         : "w780";
+      $(".ol-tmdb-concurrency", mask).value = String(state.tmdbConcurrencyLimit);
       updateModeUi();
     };
 
