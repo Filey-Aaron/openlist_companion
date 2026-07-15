@@ -59,6 +59,7 @@
       cleanupRows: [],
       cleanupGenerated: false,
       metadataReport: null,
+      duplicateReport: null,
       executionReport: null,
       retryWriteTargets: new Set(),
       compatibilityWarnings: [],
@@ -375,6 +376,7 @@
       state.cleanupRows = [];
       state.cleanupGenerated = false;
       state.metadataReport = null;
+      state.duplicateReport = null;
       state.executionReport = null;
       state.write = false;
       state.writeContentBypass = false;
@@ -1686,6 +1688,69 @@ ${studios}
       });
     };
 
+    const normalizeDuplicateTitle = (value) => {
+      CLEANUP_TECHNICAL_PATTERN.lastIndex = 0;
+      const withoutTechnical = String(value || "")
+        .replace(CLEANUP_TECHNICAL_PATTERN, " ")
+        .replace(CLEANUP_AD_PATTERN, " ")
+        .replace(CLEANUP_DOMAIN_PATTERN, " ")
+        .replace(/\[[^\]]*]|【[^】]*】|\{[^}]*}/g, " ");
+      return normalizeSeriesTitle(withoutTechnical);
+    };
+
+    const duplicateSizeAssessment = (files) => {
+      const sizes = files.map((file) => Number(file.size)).filter((size) => Number.isFinite(size) && size > 0);
+      if (sizes.length < 2) return { kind: "unknown", text: "缺少足够的文件大小信息" };
+      const minimum = Math.min(...sizes);
+      const maximum = Math.max(...sizes);
+      const difference = maximum ? ((maximum - minimum) / maximum) * 100 : 0;
+      return difference <= 10
+        ? { kind: "close", text: `大小接近（最大差 ${difference.toFixed(1)}%）` }
+        : { kind: "different", text: `大小差异较大（最大差 ${difference.toFixed(1)}%）` };
+    };
+
+    const inspectDuplicates = () => {
+      const groups = new Map();
+      state.files.forEach((file) => {
+        let descriptor;
+        if (state.mode === "tv") {
+          const episode = parseEpisodeName(file.name);
+          if (!episode) return;
+          const title = episode.title || currentDirectoryTitle();
+          const titleKey = normalizeDuplicateTitle(title);
+          if (!titleKey) return;
+          descriptor = {
+            key: `tv:${titleKey}:${episode.season}:${episode.episode}`,
+            title,
+            season: episode.season,
+            episode: episode.episode,
+          };
+        } else {
+          const movie = parseMovieName(file.name);
+          const titleKey = normalizeDuplicateTitle(movie.title);
+          if (!titleKey) return;
+          descriptor = {
+            key: `movie:${titleKey}:${movie.year || "unknown"}`,
+            title: movie.title,
+            year: movie.year,
+          };
+        }
+        const group = groups.get(descriptor.key) || { ...descriptor, files: [] };
+        group.files.push(file);
+        groups.set(descriptor.key, group);
+      });
+      const duplicates = [...groups.values()]
+        .filter((group) => group.files.length > 1)
+        .map((group) => ({ ...group, size: duplicateSizeAssessment(group.files) }))
+        .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+      state.duplicateReport = {
+        mode: state.mode,
+        groups: duplicates,
+        candidateFiles: duplicates.reduce((count, group) => count + group.files.length, 0),
+      };
+      return state.duplicateReport;
+    };
+
     const inspectMetadata = () => {
       const names = new Set(state.entries.filter((item) => !item.is_dir).map((item) => normalizeName(item.name)));
       const hasAnyPoster = ["poster.jpg", "folder.jpg", "cover.jpg"].some((name) => names.has(name));
@@ -1765,6 +1830,50 @@ ${studios}
       $(".ol-tmdb-audit-clear", node)?.addEventListener("click", () => {
         state.metadataReport = null;
         renderMetadataReport();
+        setStatus("");
+      });
+    };
+
+    const renderDuplicateReport = () => {
+      const node = $(".ol-tmdb-duplicates");
+      if (!node) return;
+      const report = state.duplicateReport;
+      if (!report) {
+        node.innerHTML = "";
+        return;
+      }
+      node.innerHTML = `
+        <div class="ol-tmdb-duplicate-head">
+          <div>
+            <strong>疑似重复报告</strong>
+            <span class="ol-tmdb-meta">${report.groups.length} 组 · ${report.candidateFiles} 个文件 · 仅报告，不会删除</span>
+          </div>
+          <button class="ol-tmdb-action ol-tmdb-duplicate-clear" type="button">收起</button>
+        </div>
+        ${report.groups.length ? `
+          <div class="ol-tmdb-duplicate-groups">
+            ${report.groups.map((group) => `
+              <section class="ol-tmdb-duplicate-group" data-size-kind="${group.size.kind}">
+                <div class="ol-tmdb-duplicate-title">
+                  <strong>${escapeHtml(group.title || "未知标题")}${report.mode === "tv"
+                    ? ` · ${tvEpisodeCode(group.season, group.episode)}`
+                    : ` · ${escapeHtml(group.year || "未知年份")}`}</strong>
+                  <span>${escapeHtml(group.size.text)}</span>
+                </div>
+                ${group.files.map((file) => `
+                  <div class="ol-tmdb-duplicate-file">
+                    <span class="ol-tmdb-code" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+                    <span>${escapeHtml(formatSize(file.size) || "大小未知")}</span>
+                  </div>
+                `).join("")}
+              </section>
+            `).join("")}
+          </div>
+        ` : '<div class="ol-tmdb-cleanup-empty">未发现具有相同规范化标题/年份或剧名/季/集的文件。</div>'}
+      `;
+      $(".ol-tmdb-duplicate-clear", node)?.addEventListener("click", () => {
+        state.duplicateReport = null;
+        renderDuplicateReport();
         setStatus("");
       });
     };
@@ -1969,6 +2078,7 @@ ${studios}
       renderResults();
       renderPreview();
       renderMetadataReport();
+      renderDuplicateReport();
       renderCleanupPreview();
       renderExecutionReport();
       renderCompatibilityWarnings();
@@ -2236,6 +2346,17 @@ ${studios}
           ? `检查完成：${summary.total - summary.ok} 个视频存在待补项`
           : `检查完成：${summary.total} 个视频均通过`,
         failed ? "error" : "ok",
+      );
+    };
+
+    const runDuplicateCheck = () => {
+      const report = inspectDuplicates();
+      renderDuplicateReport();
+      setStatus(
+        report.groups.length
+          ? `发现 ${report.groups.length} 组疑似重复，共 ${report.candidateFiles} 个文件；请人工确认`
+          : "未发现疑似重复文件",
+        report.groups.length ? "error" : "ok",
       );
     };
 
@@ -2676,6 +2797,7 @@ ${studios}
                 </label>
                 <button class="ol-tmdb-action ol-tmdb-reload" type="button">刷新文件</button>
                 <button class="ol-tmdb-action ol-tmdb-audit-run" type="button">元数据检查</button>
+                <button class="ol-tmdb-action ol-tmdb-duplicate-run" type="button">重复检测</button>
               </div>
               <div class="ol-tmdb-compatibility"></div>
               <div class="ol-tmdb-permissions"></div>
@@ -2684,6 +2806,7 @@ ${studios}
                 <div class="ol-tmdb-files"></div>
               </div>
               <div class="ol-tmdb-audit"></div>
+              <div class="ol-tmdb-duplicates"></div>
               <div class="ol-tmdb-cleanup">
                 <div class="ol-tmdb-cleanup-head">
                   <div>
@@ -2777,6 +2900,7 @@ ${studios}
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
       $(".ol-tmdb-audit-run", mask).addEventListener("click", runMetadataCheck);
+      $(".ol-tmdb-duplicate-run", mask).addEventListener("click", runDuplicateCheck);
       $(".ol-tmdb-cleanup-generate", mask).addEventListener("click", () => {
         const options = cleanupRuleOptions();
         if (!options.ads && !options.brackets && !options.technical) {
