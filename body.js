@@ -56,6 +56,8 @@
       selectedItem: null,
       selectedEpisode: null,
       tvBatchRows: [],
+      cleanupRows: [],
+      cleanupGenerated: false,
       metadataReport: null,
       executionReport: null,
       retryWriteTargets: new Set(),
@@ -207,6 +209,93 @@
       return null;
     };
 
+    const CLEANUP_TECHNICAL_PATTERN = /\b(?:4320p|2160p|1080p|720p|4k|8k|web[ ._-]?dl|webrip|bluray|bdrip|brrip|hdrip|hdtv|remux|x26[45]|h[ .]?26[45]|hevc|avc|av1|10bit|12bit|hdr10\+?|hdr|dolby[ ._-]?vision|dv|aac(?:[ .]?\d[ .]\d)?|ddp?(?:[ .]?\d[ .]\d)?|dts(?:[ ._-]?hd)?|truehd|atmos|flac|ac3)\b/gi;
+    const CLEANUP_AD_PATTERN = /(?:更多(?:高清)?资源|关注(?:微信公众号|公众号)|扫码(?:关注|下载)?|加入?\s*(?:qq|q)?群|网盘资源|本站(?:专用|发布))/gi;
+    const CLEANUP_DOMAIN_PATTERN = /\b(?:www\.)?[a-z0-9][a-z0-9-]*\.(?:com|cn|net|org)\b/gi;
+    const CLEANUP_BRACKET_AD_PATTERN = /(?:www\.|https?:|\.(?:com|cn|net|org)\b|公众号|字幕组|压制组|发布组|资源|广告|网盘|qq\s*群|q群|微信|扫码|更多)/i;
+    const containsCleanupTechnicalTag = (value) => {
+      CLEANUP_TECHNICAL_PATTERN.lastIndex = 0;
+      const matches = CLEANUP_TECHNICAL_PATTERN.test(value);
+      CLEANUP_TECHNICAL_PATTERN.lastIndex = 0;
+      return matches;
+    };
+
+    const cleanupRuleOptions = () => ({
+      ads: Boolean($(".ol-tmdb-cleanup-ads")?.checked),
+      brackets: Boolean($(".ol-tmdb-cleanup-brackets")?.checked),
+      technical: Boolean($(".ol-tmdb-cleanup-technical")?.checked),
+    });
+
+    const cleanupFilename = (name, options = cleanupRuleOptions()) => {
+      const extension = extname(name);
+      const originalBase = basename(name);
+      let cleaned = originalBase;
+      const rules = [];
+      const apply = (label, transform) => {
+        const next = transform(cleaned);
+        if (next !== cleaned) {
+          cleaned = next;
+          rules.push(label);
+        }
+      };
+
+      if (options.ads) {
+        apply("资源站 / 广告词", (value) =>
+          value
+            .replace(/\[([^\]]*)]/g, (match, content) => CLEANUP_BRACKET_AD_PATTERN.test(content) ? " " : match)
+            .replace(/【([^】]*)】/g, (match, content) => CLEANUP_BRACKET_AD_PATTERN.test(content) ? " " : match)
+            .replace(CLEANUP_AD_PATTERN, " ")
+            .replace(CLEANUP_DOMAIN_PATTERN, " ")
+        );
+      }
+      if (options.brackets) {
+        apply("无关括号", (value) =>
+          value
+            .replace(/\[([^\]]*)]|【([^】]*)】|\{([^}]*)}/g, (match, square, wide, curly) => {
+              const content = String(square ?? wide ?? curly ?? "").trim();
+              return /^(?:(?:19|20)\d{2}|s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3})$/i.test(content)
+                ? match
+                : " ";
+            })
+            .replace(/\(([^)]*)\)/g, (match, content) =>
+              CLEANUP_BRACKET_AD_PATTERN.test(content) || containsCleanupTechnicalTag(content)
+                ? " "
+                : match
+            )
+        );
+      }
+      if (options.technical) {
+        apply("技术标签", (value) => value.replace(CLEANUP_TECHNICAL_PATTERN, " "));
+      }
+
+      if (!rules.length) return { name, rules: [] };
+      cleaned = cleaned
+        .replace(/(?:\s*[._-]\s*){2,}/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .replace(/^[\s._-]+|[\s._-]+$/g, "")
+        .trim();
+      if (!cleaned || cleaned === originalBase) return { name, rules: [] };
+      return { name: `${cleaned}.${extension}`, rules };
+    };
+
+    const generateCleanupRows = (options = cleanupRuleOptions()) => {
+      const previous = new Map(state.cleanupRows.map((row) => [row.sourceName, row]));
+      state.cleanupRows = state.files.flatMap((file) => {
+        const cleaned = cleanupFilename(file.name, options);
+        if (cleaned.name === file.name) return [];
+        const prior = previous.get(file.name);
+        return [{
+          sourceName: file.name,
+          targetName: cleaned.name,
+          rules: cleaned.rules,
+          selected: prior?.targetName === cleaned.name ? prior.selected : true,
+          result: "",
+        }];
+      });
+      state.cleanupGenerated = true;
+      return state.cleanupRows;
+    };
+
     const currentDirectoryTitle = () => {
       const parts = state.currentPath.split("/").filter(Boolean);
       const last = parts.at(-1) || "";
@@ -283,6 +372,8 @@
       state.selectedItem = null;
       state.selectedEpisode = null;
       state.tvBatchRows = [];
+      state.cleanupRows = [];
+      state.cleanupGenerated = false;
       state.metadataReport = null;
       state.executionReport = null;
       state.write = false;
@@ -655,6 +746,10 @@
             ? capabilities.renameReason
             : capabilities.uploadReason;
       });
+      document.querySelectorAll(".ol-tmdb-cleanup-execute").forEach((button) => {
+        button.disabled = state.loading || !capabilities.rename;
+        button.title = capabilities.rename ? "" : capabilities.renameReason;
+      });
       renderPermissionSummary();
     };
 
@@ -667,7 +762,7 @@
 
     const setBusy = (busy) => {
       state.loading = busy;
-      document.querySelectorAll(".ol-tmdb-action, .ol-tmdb-input, .ol-tmdb-select, .ol-tmdb-file input, .ol-tmdb-check input").forEach((el) => {
+      document.querySelectorAll(".ol-tmdb-action, .ol-tmdb-input, .ol-tmdb-select, .ol-tmdb-file input, .ol-tmdb-check input, .ol-tmdb-cleanup-row input").forEach((el) => {
         if (el.dataset.keepEnabled === "true") return;
         el.disabled = busy;
       });
@@ -1393,6 +1488,40 @@ ${studios}
       return finalizeExecutionPlan({ options, rows: rowPlans, posterStep, steps });
     };
 
+    const buildCleanupExecutionPlan = () => {
+      const rowPlans = state.cleanupRows
+        .filter((row) => row.selected)
+        .map((row, index) => ({
+          row,
+          sourceName: row.sourceName,
+          target: { videoName: row.targetName },
+          steps: [renamePlanStep(
+            `cleanup:${index}:${row.sourceName}`,
+            row.sourceName,
+            row.targetName,
+            true,
+          )],
+        }));
+      const targets = new Map();
+      rowPlans.forEach((rowPlan) => {
+        const key = normalizeName(rowPlan.target.videoName);
+        const group = targets.get(key) || [];
+        group.push(rowPlan);
+        targets.set(key, group);
+      });
+      targets.forEach((group) => {
+        if (group.length < 2) return;
+        group.forEach((rowPlan) => {
+          rowPlan.steps[0] = conflictingPlanStep(rowPlan.steps[0], "清理后的目标名重复");
+        });
+      });
+      return finalizeExecutionPlan({
+        options: { rename: true, nfo: false, image: false },
+        rows: rowPlans,
+        steps: rowPlans.flatMap((rowPlan) => rowPlan.steps),
+      });
+    };
+
     const updateBatchInput = (input) => {
       const row = state.tvBatchRows.find((item) => item.name === input.dataset.name);
       if (!row) return;
@@ -1640,6 +1769,63 @@ ${studios}
       });
     };
 
+    const renderCleanupPreview = () => {
+      const node = $(".ol-tmdb-cleanup-preview");
+      if (!node) return;
+      if (!state.cleanupGenerated) {
+        node.innerHTML = '<div class="ol-tmdb-cleanup-empty">选择规则后生成预览；不会自动改名。</div>';
+        return;
+      }
+      if (!state.cleanupRows.length) {
+        node.innerHTML = '<div class="ol-tmdb-cleanup-empty">当前规则没有发现需要清理的视频文件名。</div>';
+        return;
+      }
+      const plan = buildCleanupExecutionPlan();
+      const capabilities = operationCapabilities();
+      node.innerHTML = `
+        ${renderPlanSummary(plan)}
+        <div class="ol-tmdb-cleanup-toolbar">
+          <button class="ol-tmdb-action ol-tmdb-cleanup-select-all" type="button">全选候选</button>
+          <button class="ol-tmdb-action ol-tmdb-cleanup-select-none" type="button">全部取消</button>
+          <button class="ol-tmdb-action ol-tmdb-cleanup-execute" type="button" ${capabilities.rename ? "" : "disabled"} title="${escapeHtml(capabilities.renameReason)}">执行所选改名</button>
+        </div>
+        <div class="ol-tmdb-cleanup-table">
+          ${state.cleanupRows.map((row) => {
+            const rowPlan = plan.rows.find((item) => item.row === row);
+            const step = rowPlan?.steps[0];
+            const status = row.result || (step ? step.text : "未选择");
+            const kind = row.result ? "ok" : step?.blocking ? "error" : "";
+            return `
+              <label class="ol-tmdb-cleanup-row" data-kind="${kind}">
+                <input type="checkbox" data-source-name="${escapeHtml(row.sourceName)}" ${row.selected ? "checked" : ""}>
+                <span class="ol-tmdb-code" title="${escapeHtml(row.sourceName)}">${escapeHtml(row.sourceName)}</span>
+                <span class="ol-tmdb-cleanup-arrow">→</span>
+                <span class="ol-tmdb-code" title="${escapeHtml(row.targetName)}">${escapeHtml(row.targetName)}</span>
+                <span class="ol-tmdb-meta">${escapeHtml(row.rules.join("、"))}</span>
+                <span class="ol-tmdb-cleanup-status">${escapeHtml(status)}</span>
+              </label>
+            `;
+          }).join("")}
+        </div>
+      `;
+      node.querySelectorAll(".ol-tmdb-cleanup-row input").forEach((input) => {
+        input.addEventListener("change", () => {
+          const row = state.cleanupRows.find((item) => item.sourceName === input.dataset.sourceName);
+          if (row) row.selected = input.checked;
+          renderCleanupPreview();
+        });
+      });
+      $(".ol-tmdb-cleanup-select-all", node)?.addEventListener("click", () => {
+        state.cleanupRows.forEach((row) => { row.selected = true; });
+        renderCleanupPreview();
+      });
+      $(".ol-tmdb-cleanup-select-none", node)?.addEventListener("click", () => {
+        state.cleanupRows.forEach((row) => { row.selected = false; });
+        renderCleanupPreview();
+      });
+      $(".ol-tmdb-cleanup-execute", node)?.addEventListener("click", executeCleanupRename);
+    };
+
     const renderResults = () => {
       const list = $(".ol-tmdb-results");
       if (!list) return;
@@ -1783,6 +1969,7 @@ ${studios}
       renderResults();
       renderPreview();
       renderMetadataReport();
+      renderCleanupPreview();
       renderExecutionReport();
       renderCompatibilityWarnings();
       updatePermissionControls();
@@ -1964,6 +2151,79 @@ ${studios}
     const refreshFilesAfterMutation = async (preferredName = "") => {
       triggerOpenListRefresh();
       return loadFiles(preferredName);
+    };
+
+    const executeCleanupRename = async () => {
+      if (!ensureLoadedDirectory()) return;
+      const capabilities = operationCapabilities();
+      if (!capabilities.rename) {
+        setStatus(`无法执行文件名清理：${capabilities.renameReason}`, "error");
+        return;
+      }
+      const plan = buildCleanupExecutionPlan();
+      if (!plan.rows.length) {
+        setStatus("请至少选择一个文件名清理候选", "error");
+        return;
+      }
+      if (plan.blocking.length) {
+        setStatus(`文件名清理存在 ${plan.blocking.length} 个目标冲突，请取消或调整对应项`, "error");
+        return;
+      }
+
+      setBusy(true);
+      const report = beginExecutionReport(plan);
+      const renameObjects = plan.rows.map((rowPlan) => ({
+        src_name: rowPlan.sourceName,
+        new_name: rowPlan.target.videoName,
+      }));
+      try {
+        setStatus(`正在清理 ${renameObjects.length} 个文件名...`);
+        await batchRename(state.currentPath, renameObjects);
+        plan.rows.forEach((rowPlan) => {
+          rowPlan.row.result = "改名完成";
+          updateExecutionReport(report, rowPlan.steps[0], "success");
+        });
+        const summary = finishExecutionReport(report);
+        await refreshFilesAfterMutation(renameObjects[0]?.new_name || "");
+        state.cleanupRows = [];
+        state.cleanupGenerated = false;
+        render();
+        setStatus(`文件名清理完成：成功 ${summary.success} 项`, "ok");
+      } catch (error) {
+        let reloadError = null;
+        try {
+          await refreshFilesAfterMutation();
+        } catch (failure) {
+          reloadError = failure;
+        }
+        let recovered = 0;
+        plan.rows.forEach((rowPlan) => {
+          const sourceExists = Boolean(findEntry(rowPlan.sourceName));
+          const targetExists = Boolean(findEntry(rowPlan.target.videoName));
+          if (!sourceExists && targetExists) {
+            rowPlan.row.selected = false;
+            rowPlan.row.result = "服务端报错前已生效";
+            updateExecutionReport(report, rowPlan.steps[0], "success");
+            recovered += 1;
+          } else {
+            rowPlan.row.result = sourceExists ? "未改名，可重试" : "文件状态不明，请检查目录";
+            updateExecutionReport(
+              report,
+              rowPlan.steps[0],
+              "failed",
+              reloadError ? `${error.message}；目录回读失败：${reloadError.message}` : error.message,
+            );
+          }
+        });
+        const summary = finishExecutionReport(report);
+        renderCleanupPreview();
+        setStatus(
+          `文件名清理未完全成功：确认已生效 ${recovered} 项，待重试 ${summary.failed} 项${reloadError ? "；目录回读失败" : ""}`,
+          "error",
+        );
+      } finally {
+        setBusy(false);
+      }
     };
 
     const runMetadataCheck = () => {
@@ -2424,6 +2684,21 @@ ${studios}
                 <div class="ol-tmdb-files"></div>
               </div>
               <div class="ol-tmdb-audit"></div>
+              <div class="ol-tmdb-cleanup">
+                <div class="ol-tmdb-cleanup-head">
+                  <div>
+                    <strong>文件名清理</strong>
+                    <span class="ol-tmdb-meta">仅生成候选；执行前可逐项取消</span>
+                  </div>
+                  <button class="ol-tmdb-action ol-tmdb-cleanup-generate" type="button">生成清理预览</button>
+                </div>
+                <div class="ol-tmdb-row ol-tmdb-cleanup-rules">
+                  <label class="ol-tmdb-check"><input class="ol-tmdb-cleanup-ads" type="checkbox" checked> 资源站 / 广告词</label>
+                  <label class="ol-tmdb-check"><input class="ol-tmdb-cleanup-brackets" type="checkbox" checked> 无关括号</label>
+                  <label class="ol-tmdb-check"><input class="ol-tmdb-cleanup-technical" type="checkbox"> 技术标签</label>
+                </div>
+                <div class="ol-tmdb-cleanup-preview"></div>
+              </div>
               <div class="ol-tmdb-row ol-tmdb-tv-only ol-tmdb-batch-actions">
                 <button class="ol-tmdb-action ol-tmdb-select-all-files" type="button">全选</button>
                 <button class="ol-tmdb-action ol-tmdb-select-parsed-files" type="button">选择可解析</button>
@@ -2502,6 +2777,16 @@ ${studios}
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
       $(".ol-tmdb-audit-run", mask).addEventListener("click", runMetadataCheck);
+      $(".ol-tmdb-cleanup-generate", mask).addEventListener("click", () => {
+        const options = cleanupRuleOptions();
+        if (!options.ads && !options.brackets && !options.technical) {
+          setStatus("请至少选择一类文件名清理规则", "error");
+          return;
+        }
+        const rows = generateCleanupRows(options);
+        renderCleanupPreview();
+        setStatus(rows.length ? `发现 ${rows.length} 个文件名清理候选` : "当前规则没有发现可清理的文件名", rows.length ? "ok" : "");
+      });
       $(".ol-tmdb-select-all-files", mask).addEventListener("click", () => {
         state.selectedNames = state.files.map((file) => file.name);
         state.selectedName = state.selectedNames[0] || "";
