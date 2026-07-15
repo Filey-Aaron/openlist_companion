@@ -103,6 +103,34 @@
     border-bottom: 0;
   }
 
+  .ol-tmdb-footer-info {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+  }
+
+  .ol-tmdb-execution-report {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    font-size: 11px;
+    color: var(--hope-colors-neutral10, #777);
+  }
+
+  .ol-tmdb-execution-report:empty {
+    display: none;
+  }
+
+  .ol-tmdb-report-copy {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--hope-colors-primary9, #1677ff);
+    cursor: pointer;
+    font: inherit;
+  }
+
   .ol-tmdb-title {
     margin: 0;
     font-size: 16px;
@@ -161,6 +189,14 @@
     gap: 6px;
     font-size: 13px;
     user-select: none;
+  }
+
+  .ol-tmdb-operation-options {
+    flex-wrap: wrap;
+  }
+
+  .ol-tmdb-overwrite-check {
+    color: var(--hope-colors-warning10, #874d00);
   }
 
   .ol-tmdb-modal[data-mode="movie"] .ol-tmdb-tv-only,
@@ -261,6 +297,64 @@
     min-width: 0;
     display: grid;
     gap: 2px;
+  }
+
+  .ol-tmdb-plan-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--hope-colors-neutral5, #e8e8e8);
+    border-radius: 6px;
+    background: var(--hope-colors-neutral1, #fff);
+    font-size: 12px;
+  }
+
+  .ol-tmdb-plan-summary[data-kind="warn"] {
+    border-color: var(--hope-colors-warning7, #d89614);
+  }
+
+  .ol-tmdb-plan-summary[data-kind="error"] {
+    border-color: var(--hope-colors-danger8, #cf1322);
+  }
+
+  .ol-tmdb-plan {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    margin-top: 5px;
+  }
+
+  .ol-tmdb-plan-global {
+    margin-top: 0;
+  }
+
+  .ol-tmdb-plan-step {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    border-radius: 999px;
+    padding: 2px 7px;
+    background: var(--hope-colors-neutral4, #eee);
+    color: var(--hope-colors-neutral11, #555);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .ol-tmdb-plan-step[data-kind="ok"] {
+    background: color-mix(in srgb, var(--hope-colors-success9, #237804) 12%, transparent);
+    color: var(--hope-colors-success9, #237804);
+  }
+
+  .ol-tmdb-plan-step[data-kind="warn"] {
+    background: color-mix(in srgb, var(--hope-colors-warning9, #ad6800) 14%, transparent);
+    color: var(--hope-colors-warning10, #874d00);
+  }
+
+  .ol-tmdb-plan-step[data-kind="error"] {
+    background: color-mix(in srgb, var(--hope-colors-danger9, #d4380d) 12%, transparent);
+    color: var(--hope-colors-danger9, #d4380d);
   }
 
   .ol-tmdb-batch-actions {
