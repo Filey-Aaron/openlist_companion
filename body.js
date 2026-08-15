@@ -56,6 +56,7 @@
       selectedItem: null,
       selectedEpisode: null,
       tvBatchRows: [],
+      tvSeasonOverride: 0,
       cleanupRows: [],
       cleanupGenerated: false,
       metadataReport: null,
@@ -429,6 +430,7 @@
       state.selectedItem = null;
       state.selectedEpisode = null;
       state.tvBatchRows = [];
+      state.tvSeasonOverride = 0;
       state.cleanupRows = [];
       state.cleanupGenerated = false;
       state.metadataReport = null;
@@ -1604,6 +1606,22 @@ ${studios}
       return true;
     };
 
+    const applyBatchSeasonOverride = (season, rows = state.tvBatchRows) => {
+      const normalizedSeason = positiveNumber(season);
+      if (!normalizedSeason) return false;
+      rows.forEach((row) => {
+        row.season = normalizedSeason;
+        row.episodeDetails = null;
+        row.error = "";
+        row.result = "";
+      });
+      return true;
+    };
+
+    if (window.__OPENLIST_TMDB_TEST_HOOKS__) {
+      window.__OPENLIST_TMDB_TEST_HOOKS__.applyBatchSeasonOverride = applyBatchSeasonOverride;
+    }
+
     const bindBatchOverviewActions = (preview) => {
       $(".ol-tmdb-fill-sequential", preview)?.addEventListener("click", () => {
         const season = $(".ol-tmdb-fill-season", preview)?.value;
@@ -2168,6 +2186,7 @@ ${studios}
     };
 
     const hydrateSearchFromFile = () => {
+      state.tvSeasonOverride = 0;
       const file = selectedFile();
       if (!file) return;
       const episode = parseEpisodeName(file.name, currentEpisodeParseContext());
@@ -2453,6 +2472,7 @@ ${studios}
         state.selectedEpisode = null;
         if (state.mode === "tv" && isTvBatchActive()) {
           syncTvBatchRows();
+          applyBatchSeasonOverride(state.tvSeasonOverride);
           const result = await fetchTvBatchEpisodes();
           render();
           setStatus(
@@ -3030,6 +3050,9 @@ ${studios}
       });
       $(".ol-tmdb-year", mask).addEventListener("keydown", (event) => {
         if (event.key === "Enter") doSearch();
+      });
+      $(".ol-tmdb-season", mask).addEventListener("input", (event) => {
+        state.tvSeasonOverride = positiveNumber(event.target.value);
       });
       const optionStorage = new Map([
         ["ol-tmdb-do-rename", STORAGE.rename],

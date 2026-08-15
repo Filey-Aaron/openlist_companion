@@ -108,3 +108,17 @@ test("explicit file season overrides directory inference", () => {
   });
   assert.equal(parser.parseEpisodeName("第24集.mkv", context).season, 2);
 });
+
+test("batch season override preserves parsed episode numbers and row order", () => {
+  const rows = [
+    { season: 1, episode: 24, episodeDetails: { id: 24 }, error: "old", result: "old" },
+    { season: 1, episode: 23, episodeDetails: { id: 23 }, error: "old", result: "old" },
+  ];
+
+  assert.equal(parser.applyBatchSeasonOverride(2, rows), true);
+  assert.deepEqual(rows.map(({ season, episode }) => ({ season, episode })), [
+    { season: 2, episode: 24 },
+    { season: 2, episode: 23 },
+  ]);
+  assert.equal(rows.every((row) => row.episodeDetails === null && !row.error && !row.result), true);
+});
