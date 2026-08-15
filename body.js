@@ -168,6 +168,40 @@
 
     const standardEpisodePattern = /\bS\d{2}E\d{2,3}\b/i;
 
+    const seasonFromDirectoryName = (name) => {
+      const match = String(name || "").match(
+        /^(?:(?:season|s)\s*(\d{1,2})|第\s*(\d{1,2})\s*季)$/i,
+      );
+      const season = Number(match?.[1] || match?.[2]);
+      return Number.isInteger(season) && season > 0 ? season : 0;
+    };
+
+    const inferSeasonFromPath = (path) => {
+      const parts = String(path || "").split("/").filter(Boolean);
+      for (let index = parts.length - 1; index >= 0; index -= 1) {
+        const season = seasonFromDirectoryName(parts[index]);
+        if (season) return season;
+      }
+      return 0;
+    };
+
+    const bareEpisodeNumber = (name) => {
+      const match = basename(name).match(/^\d{1,3}$/);
+      const episode = Number(match?.[0]);
+      return Number.isInteger(episode) && episode > 0 ? episode : 0;
+    };
+
+    const buildEpisodeParseContext = (files, path, tvMode = false) => {
+      const pathSeason = inferSeasonFromPath(path);
+      const defaultSeason = pathSeason || 1;
+      const bareNumberCount = files.filter((file) => bareEpisodeNumber(file.name)).length;
+      return {
+        defaultSeason,
+        bareNumberCount,
+        allowBareNumber: Boolean(tvMode) || Boolean(pathSeason) || bareNumberCount >= 2,
+      };
+    };
+
     const parseMovieName = (name) => {
       const base = basename(name);
       const yearMatch = base.match(/(?:^|[.\s_\-[({])((?:19|20)\d{2})(?:$|[.\s_\-\])}])/);
@@ -182,7 +216,7 @@
       return { title: title || base.replace(/[._]+/g, " ").trim(), year };
     };
 
-    const parseEpisodeName = (name) => {
+    const parseEpisodeName = (name, context = {}) => {
       const base = basename(name);
       const patterns = [
         /\bS(\d{1,2})\s*E(\d{1,3})\b/i,
@@ -193,7 +227,7 @@
       for (const pattern of patterns) {
         const match = base.match(pattern);
         if (!match) continue;
-        const season = match.length > 2 ? Number(match[1]) : 1;
+        const season = match.length > 2 ? Number(match[1]) : Number(context.defaultSeason) || 1;
         const episode = Number(match.length > 2 ? match[2] : match[1]);
         const title = base
           .slice(0, match.index)
@@ -205,6 +239,15 @@
           season: Number.isFinite(season) && season > 0 ? season : 1,
           episode,
           title,
+        };
+      }
+      const episode = context.allowBareNumber ? bareEpisodeNumber(name) : 0;
+      if (episode) {
+        const season = Number(context.defaultSeason) || 1;
+        return {
+          season: Number.isInteger(season) && season > 0 ? season : 1,
+          episode,
+          title: "",
         };
       }
       return null;
@@ -301,15 +344,28 @@
       const parts = state.currentPath.split("/").filter(Boolean);
       const last = parts.at(-1) || "";
       const parent = parts.at(-2) || last;
-      const candidate = /^(season|s)\s*\d+|第\s*\d+\s*季$/i.test(last) ? parent : last;
+      const candidate = seasonFromDirectoryName(last) ? parent : last;
       return candidate.replace(/[._-]+/g, " ").trim();
     };
 
-    const inferMode = (files) => {
-      const episodeCount = files.filter((file) => parseEpisodeName(file.name)).length;
-      const pathLooksTv = /(?:^|\/)(season\s*\d+|s\d{1,2}|第\s*\d+\s*季)(?:\/|$)/i.test(state.currentPath);
+    const inferMode = (files, path = state.currentPath) => {
+      const context = buildEpisodeParseContext(files, path);
+      const episodeCount = files.filter((file) => parseEpisodeName(file.name, context)).length;
+      const pathLooksTv = Boolean(inferSeasonFromPath(path));
       return episodeCount >= Math.max(1, Math.ceil(files.length * 0.4)) || pathLooksTv ? "tv" : "movie";
     };
+
+    const currentEpisodeParseContext = () =>
+      buildEpisodeParseContext(state.files, state.currentPath, state.mode === "tv");
+
+    if (window.__OPENLIST_TMDB_TEST_HOOKS__) {
+      Object.assign(window.__OPENLIST_TMDB_TEST_HOOKS__, {
+        buildEpisodeParseContext,
+        inferMode,
+        inferSeasonFromPath,
+        parseEpisodeName,
+      });
+    }
 
     const safeFilePart = (value) =>
       String(value || "")
@@ -1200,11 +1256,12 @@ ${studios}
       }
       const existingRows = new Map(state.tvBatchRows.map((row) => [row.name, row]));
       const selectedSet = new Set(state.selectedNames);
+      const parseContext = currentEpisodeParseContext();
       state.selectedNames = state.files
         .map((file) => file.name)
         .filter((name) => selectedSet.has(name));
       state.tvBatchRows = state.selectedNames.map((name) => {
-        const parsed = parseEpisodeName(name);
+        const parsed = parseEpisodeName(name, parseContext);
         const previous = existingRows.get(name);
         const season = positiveNumber(previous?.season) || parsed?.season || "";
         const episode = positiveNumber(previous?.episode) || parsed?.episode || "";
@@ -1246,7 +1303,7 @@ ${studios}
 
     const batchRowSuspicion = (row) => {
       if (!state.selectedItem) return "";
-      const parsedTitle = parseEpisodeName(row.name)?.title || "";
+      const parsedTitle = parseEpisodeName(row.name, currentEpisodeParseContext())?.title || "";
       const candidate = normalizeSeriesTitle(parsedTitle);
       if (candidate.length < 2) return "";
       const references = [
@@ -1711,10 +1768,11 @@ ${studios}
 
     const inspectDuplicates = () => {
       const groups = new Map();
+      const parseContext = currentEpisodeParseContext();
       state.files.forEach((file) => {
         let descriptor;
         if (state.mode === "tv") {
-          const episode = parseEpisodeName(file.name);
+          const episode = parseEpisodeName(file.name, parseContext);
           if (!episode) return;
           const title = episode.title || currentDirectoryTitle();
           const titleKey = normalizeDuplicateTitle(title);
@@ -1754,6 +1812,7 @@ ${studios}
     const inspectMetadata = () => {
       const names = new Set(state.entries.filter((item) => !item.is_dir).map((item) => normalizeName(item.name)));
       const hasAnyPoster = ["poster.jpg", "folder.jpg", "cover.jpg"].some((name) => names.has(name));
+      const parseContext = currentEpisodeParseContext();
       const rows = state.files.map((file) => {
         const base = basename(file.name);
         const nfoName = `${base}.nfo`;
@@ -1765,7 +1824,7 @@ ${studios}
           issues.push("缺失 JPG / poster");
         }
         if (state.mode === "tv") {
-          const episode = parseEpisodeName(file.name);
+          const episode = parseEpisodeName(file.name, parseContext);
           if (!episode) {
             issues.push("季集解析失败");
           } else if (!standardEpisodePattern.test(file.name)) {
@@ -2111,7 +2170,7 @@ ${studios}
     const hydrateSearchFromFile = () => {
       const file = selectedFile();
       if (!file) return;
-      const episode = parseEpisodeName(file.name);
+      const episode = parseEpisodeName(file.name, currentEpisodeParseContext());
       if (state.mode === "tv") {
         $(".ol-tmdb-query").value = episode?.title || currentDirectoryTitle();
         $(".ol-tmdb-year").value = "";
@@ -2125,10 +2184,11 @@ ${studios}
     };
 
     const chooseNextFileName = (previousName, renamedName) => {
-      const previousEpisode = parseEpisodeName(previousName);
+      const parseContext = currentEpisodeParseContext();
+      const previousEpisode = parseEpisodeName(previousName, parseContext);
       const candidates = state.files
         .filter((file) => file.name !== previousName && file.name !== renamedName)
-        .map((file) => ({ file, episode: parseEpisodeName(file.name) }))
+        .map((file) => ({ file, episode: parseEpisodeName(file.name, parseContext) }))
         .filter(({ episode }) => state.mode !== "tv" || episode)
         .sort((a, b) => {
           if (state.mode === "tv") {
@@ -2924,8 +2984,9 @@ ${studios}
         render();
       });
       $(".ol-tmdb-select-parsed-files", mask).addEventListener("click", () => {
+        const parseContext = currentEpisodeParseContext();
         const parsedNames = state.files
-          .filter((file) => parseEpisodeName(file.name))
+          .filter((file) => parseEpisodeName(file.name, parseContext))
           .map((file) => file.name);
         if (!parsedNames.length) {
           setStatus("当前目录没有可自动解析季集的视频", "error");
