@@ -45,6 +45,7 @@
       "m4v",
       "mpg",
       "mpeg",
+      "strm",
     ]);
 
     const state = {
@@ -3122,6 +3123,57 @@ ${studios}
       }
     };
 
+    const autoMatchTvShow = async () => {
+      const pathSeason = inferSeasonFromPath(state.currentPath);
+      if (state.mode !== "tv" && !pathSeason) return;
+      const title = currentDirectoryTitle();
+      if (!title) return;
+      const key = localStorage.getItem(STORAGE.key);
+      if (!key) return;
+      if (pathSeason && state.mode !== "tv") {
+        state.mode = "tv";
+        const modeSelect = $(".ol-tmdb-mode");
+        if (modeSelect) modeSelect.value = "tv";
+        updateModeUi();
+      }
+      if (pathSeason) {
+        const seasonInput = $(".ol-tmdb-season");
+        if (seasonInput) seasonInput.value = pathSeason;
+        state.tvSeasonOverride = pathSeason;
+      }
+      if (state.mode === "tv" && state.files.length > 1) {
+        state.selectedNames = state.files.map((file) => file.name);
+        state.selectedName = state.selectedNames[0];
+        syncTvBatchRows();
+      }
+      const queryInput = $(".ol-tmdb-query");
+      if (queryInput) queryInput.value = title;
+      setBusy(true);
+      setStatus(`自动搜索 TMDB: ${title}...`);
+      try {
+        const payload = await searchTv(title, "");
+        state.results = (payload.results || []).slice(0, 10);
+        state.selectedItem = null;
+        state.selectedEpisode = null;
+        if (state.results.length === 1) {
+          setStatus(`自动匹配到: ${itemDisplayTitle(state.results[0])}`);
+          await selectItem(state.results[0].id);
+        } else {
+          render();
+          setStatus(
+            state.results.length
+              ? `自动搜索完成，找到 ${state.results.length} 个结果，请选择`
+              : `自动搜索"${title}"无结果，请手动搜索`,
+            state.results.length ? "" : "error",
+          );
+        }
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        setBusy(false);
+      }
+    };
+
     const openModal = () => {
       const path = currentOpenListPath();
       if (path !== state.currentPath) resetDirectoryState(path);
@@ -3130,7 +3182,10 @@ ${studios}
       state.results = [];
       state.selectedItem = null;
       state.selectedEpisode = null;
-      withStatus(loadFiles);
+      withStatus(async () => {
+        const loaded = await loadFiles();
+        if (loaded) await autoMatchTvShow();
+      });
     };
 
     const closeModal = () => {
