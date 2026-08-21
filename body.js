@@ -78,6 +78,7 @@
       retryWriteTargets: new Set(),
       compatibilityWarnings: [],
       mode: "movie",
+      sortOrder: "asc",
       currentPath: "/",
       write: false,
       writeContentBypass: false,
@@ -431,6 +432,11 @@
 
     const directorySearchQuery = () => cleanSearchQuery(currentDirectoryTitle());
 
+    const sortedFiles = () => {
+      const factor = state.sortOrder === "desc" ? -1 : 1;
+      return [...state.files].sort((a, b) => factor * naturalCompare(a.name, b.name));
+    };
+
     const directoryYear = () => {
       const title = currentDirectoryTitle();
       const match = title.match(/(?:^|[.\s_\-[({])((?:19|20)\d{2})(?:$|[.\s_\-\])}])/);
@@ -456,6 +462,7 @@
         naturalCompare,
         cleanSearchQuery,
         currentDirectoryTitle,
+        sortedFiles,
       });
     }
 
@@ -1350,7 +1357,7 @@ ${studios}
       const existingRows = new Map(state.tvBatchRows.map((row) => [row.name, row]));
       const selectedSet = new Set(state.selectedNames);
       const parseContext = currentEpisodeParseContext();
-      state.selectedNames = state.files
+      state.selectedNames = sortedFiles()
         .map((file) => file.name)
         .filter((name) => selectedSet.has(name));
       state.tvBatchRows = state.selectedNames.map((name) => {
@@ -1830,7 +1837,7 @@ ${studios}
       }
       const tvMode = state.mode === "tv";
       const selectedSet = new Set(state.selectedNames);
-      list.innerHTML = state.files
+      list.innerHTML = sortedFiles()
         .map(
           (file) => {
             const selected = tvMode ? selectedSet.has(file.name) : file.name === state.selectedName;
@@ -2383,7 +2390,7 @@ ${studios}
       state.selectedName =
         (preferredName && state.files.some((file) => file.name === preferredName) && preferredName) ||
         (state.selectedName && state.files.some((file) => file.name === state.selectedName) && state.selectedName) ||
-        state.files[0]?.name ||
+        sortedFiles()[0]?.name ||
         "";
       if (state.mode === "tv") {
         const available = new Set(state.files.map((file) => file.name));
@@ -3121,7 +3128,7 @@ ${studios}
               <div class="ol-tmdb-compatibility"></div>
               <div class="ol-tmdb-permissions"></div>
               <div class="ol-tmdb-list">
-                <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
+                <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span class="ol-tmdb-sort-area"><button class="ol-tmdb-action ol-tmdb-sort-toggle" type="button" title="切换排序方向">升序 ↑</button></span></div>
                 <div class="ol-tmdb-files"></div>
               </div>
               <div class="ol-tmdb-audit"></div>
@@ -3218,6 +3225,13 @@ ${studios}
       document.body.appendChild(mask);
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
+      $(".ol-tmdb-sort-toggle", mask).addEventListener("click", () => {
+        state.sortOrder = state.sortOrder === "asc" ? "desc" : "asc";
+        const btn = $(".ol-tmdb-sort-toggle");
+        if (btn) btn.textContent = state.sortOrder === "asc" ? "升序 ↑" : "降序 ↓";
+        syncTvBatchRows();
+        render();
+      });
       $(".ol-tmdb-renumber", mask).addEventListener("click", () => withStatus(renumberFiles));
       $(".ol-tmdb-audit-run", mask).addEventListener("click", runMetadataCheck);
       $(".ol-tmdb-duplicate-run", mask).addEventListener("click", runDuplicateCheck);
@@ -3232,7 +3246,7 @@ ${studios}
         setStatus(rows.length ? `发现 ${rows.length} 个文件名清理候选` : "当前规则没有发现可清理的文件名", rows.length ? "ok" : "");
       });
       $(".ol-tmdb-select-all-files", mask).addEventListener("click", () => {
-        state.selectedNames = state.files.map((file) => file.name);
+        state.selectedNames = sortedFiles().map((file) => file.name);
         state.selectedName = state.selectedNames[0] || "";
         if (state.selectedNames.length < 2) {
           state.selectedItem = null;
@@ -3380,7 +3394,7 @@ ${studios}
         state.tvSeasonOverride = pathSeason;
       }
       if (state.mode === "tv" && state.files.length > 1) {
-        state.selectedNames = state.files.map((file) => file.name);
+        state.selectedNames = sortedFiles().map((file) => file.name);
         state.selectedName = state.selectedNames[0];
         syncTvBatchRows();
       }
