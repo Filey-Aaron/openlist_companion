@@ -45,7 +45,6 @@
       "m4v",
       "mpg",
       "mpeg",
-      "strm",
     ]);
 
     const state = {
@@ -3128,8 +3127,11 @@ ${studios}
       if (state.mode !== "tv" && !pathSeason) return;
       const title = currentDirectoryTitle();
       if (!title) return;
-      const key = localStorage.getItem(STORAGE.key);
-      if (!key) return;
+      const key = $(".ol-tmdb-api-key")?.value.trim() || localStorage.getItem(STORAGE.key);
+      if (!key) {
+        setStatus("未检测到 TMDB API Key，已跳过自动匹配", "error");
+        return;
+      }
       if (pathSeason && state.mode !== "tv") {
         state.mode = "tv";
         const modeSelect = $(".ol-tmdb-mode");
