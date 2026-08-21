@@ -45,6 +45,19 @@
       "m4v",
       "mpg",
       "mpeg",
+      "strm",
+    ]);
+    const SUB_EXTS = new Set([
+      "srt",
+      "ass",
+      "ssa",
+      "sub",
+      "vtt",
+      "idx",
+      "sup",
+      "smi",
+      "srt2",
+      "txt",
     ]);
 
     const state = {
@@ -164,6 +177,16 @@
     };
 
     const isVideo = (obj) => !obj.is_dir && VIDEO_EXTS.has(extname(obj.name));
+
+    const isSubtitle = (obj) => !obj.is_dir && SUB_EXTS.has(extname(obj.name));
+
+    const findSubtitleFiles = (videoName) => {
+      const base = basename(videoName);
+      return state.entries.filter((entry) => {
+        if (!isSubtitle(entry)) return false;
+        return basename(entry.name) === base;
+      });
+    };
 
     const normalizeName = (name) => String(name || "").toLowerCase();
 
@@ -514,17 +537,17 @@
       ...extra,
     });
 
-    const renamePlanStep = (id, sourceName, targetName, enabled) => {
-      if (!enabled) return planStep(id, "rename", "视频", targetName, "disabled", "未选择");
-      if (!targetName) return planStep(id, "rename", "视频", targetName, "pending", "待生成目标");
+    const renamePlanStep = (id, sourceName, targetName, enabled, label = "视频") => {
+      if (!enabled) return planStep(id, "rename", label, targetName, "disabled", "未选择", { sourceName });
+      if (!targetName) return planStep(id, "rename", label, targetName, "pending", "待生成目标", { sourceName });
       if (sourceName === targetName) {
-        return planStep(id, "rename", "视频", targetName, "unchanged", "无需变更");
+        return planStep(id, "rename", label, targetName, "unchanged", "无需变更", { sourceName });
       }
       const existing = findEntry(targetName, sourceName);
       if (existing) {
-        return planStep(id, "rename", "视频", targetName, "conflict", existing.is_dir ? "与目录冲突" : "目标已存在");
+        return planStep(id, "rename", label, targetName, "conflict", existing.is_dir ? "与目录冲突" : "目标已存在", { sourceName });
       }
-      return planStep(id, "rename", "视频", targetName, "rename", "改名");
+      return planStep(id, "rename", label, targetName, "rename", "改名", { sourceName });
     };
 
     const writePlanStep = (id, type, label, name, enabled, overwrite, extra = {}) => {
@@ -1407,15 +1430,24 @@ ${studios}
       }
       const finalVideoName = options.rename ? targetVideoName() : file.name;
       const finalBaseName = basename(finalVideoName);
+      const subtitles = findSubtitleFiles(file.name).map((sub) => ({
+        sourceName: sub.name,
+        targetName: `${finalBaseName}.${extname(sub.name)}`,
+      }));
       const target = {
         videoName: finalVideoName,
         nfoName: `${finalBaseName}.nfo`,
         imageName: state.mode === "tv" ? `${finalBaseName}.jpg` : `${finalBaseName}-poster.jpg`,
         posterName: state.mode === "tv" ? "poster.jpg" : "",
+        subtitles,
       };
       const stillPath = state.mode === "tv" ? state.selectedEpisode?.still_path : state.selectedItem.poster_path;
+      const subtitleSteps = subtitles.map((sub, subIndex) =>
+        renamePlanStep(`single:subtitle:${subIndex}`, sub.sourceName, sub.targetName, options.rename, "字幕"),
+      );
       const steps = [
         renamePlanStep("single:rename", file.name, target.videoName, options.rename),
+        ...subtitleSteps,
         writePlanStep("single:nfo", "nfo", "NFO", target.nfoName, options.nfo, options.overwrite),
         writePlanStep(
           "single:image",
@@ -1466,13 +1498,22 @@ ${studios}
         }
         const finalVideoName = options.rename ? matchedTarget.videoName : row.name;
         const finalBaseName = basename(finalVideoName);
+        const subtitles = findSubtitleFiles(row.name).map((sub) => ({
+          sourceName: sub.name,
+          targetName: `${finalBaseName}.${extname(sub.name)}`,
+        }));
         const target = {
           videoName: finalVideoName,
           nfoName: `${finalBaseName}.nfo`,
           imageName: `${finalBaseName}.jpg`,
+          subtitles,
         };
+        const subtitleSteps = subtitles.map((sub, subIndex) =>
+          renamePlanStep(`batch:${index}:subtitle:${subIndex}`, sub.sourceName, sub.targetName, options.rename, "字幕"),
+        );
         const steps = [
           renamePlanStep(`batch:${index}:rename`, row.name, target.videoName, options.rename),
+          ...subtitleSteps,
           writePlanStep(`batch:${index}:nfo`, "nfo", "NFO", target.nfoName, options.nfo, options.overwrite),
           writePlanStep(
             `batch:${index}:image`,
@@ -2559,13 +2600,20 @@ ${studios}
               ? [{ rowPlan, step }]
               : [];
           });
-          const renameObjects = renamePlans.map(({ rowPlan }) => ({
-            src_name: rowPlan.sourceName,
-            new_name: rowPlan.target.videoName,
-          }));
+          const renameObjects = renamePlans.flatMap(({ rowPlan }) => {
+            const objects = [{ src_name: rowPlan.sourceName, new_name: rowPlan.target.videoName }];
+            const subSteps = rowPlan.steps.filter((s) => s.type === "rename" && s.label === "字幕" && s.run);
+            subSteps.forEach((s) => {
+              objects.push({ src_name: s.sourceName, new_name: s.name });
+            });
+            return objects;
+          });
           if (renameObjects.length) {
             setStatus(`正在批量改名 ${renameObjects.length} 个文件...`);
-            activeSteps = renamePlans.map(({ step }) => step);
+            activeSteps = renamePlans.flatMap(({ rowPlan, step }) => [
+              step,
+              ...rowPlan.steps.filter((s) => s.type === "rename" && s.label === "字幕" && s.run),
+            ]);
             await batchRename(state.currentPath, renameObjects);
             activeSteps.forEach((step) => updateExecutionReport(report, step, "success"));
             activeSteps = [];
@@ -2740,15 +2788,22 @@ ${studios}
 
         report = beginExecutionReport(plan);
         const preparedImages = await preparePlanImages(plan);
-        const renameStep = rowPlan.steps.find((step) => step.type === "rename");
+        const renameStep = rowPlan.steps.find((step) => step.type === "rename" && step.label === "视频");
         if (renameStep?.run) {
           setStatus("正在改名...");
           activeStep = renameStep;
-          await batchRename(state.currentPath, [{ src_name: oldName, new_name: newVideoName }]);
+          const subSteps = rowPlan.steps.filter((step) => step.type === "rename" && step.label === "字幕" && step.run);
+          const renameObjects = [{ src_name: oldName, new_name: newVideoName }];
+          subSteps.forEach((step) => {
+            renameObjects.push({ src_name: step.sourceName, new_name: step.name });
+          });
+          await batchRename(state.currentPath, renameObjects);
           actualName = newVideoName;
           updateExecutionReport(report, renameStep, "success");
+          subSteps.forEach((step) => updateExecutionReport(report, step, "success"));
           activeStep = null;
           messages.push("改名完成");
+          if (subSteps.length) messages.push(`字幕改名 ${subSteps.length} 个`);
         } else if (renameStep?.status === "unchanged") {
           messages.push("文件名无需变更");
         }
