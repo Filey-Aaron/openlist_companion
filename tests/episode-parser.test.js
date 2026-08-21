@@ -122,3 +122,29 @@ test("batch season override preserves parsed episode numbers and row order", () 
   ]);
   assert.equal(rows.every((row) => row.episodeDetails === null && !row.error && !row.result), true);
 });
+
+test("naturalCompare sorts numeric filenames in natural order", () => {
+  const names = ["10.strm", "2.strm", "1.strm", "3.strm", "11.strm"];
+  const sorted = [...names].sort(parser.naturalCompare);
+  assert.deepEqual(sorted, ["1.strm", "2.strm", "3.strm", "10.strm", "11.strm"]);
+});
+
+test("naturalCompare keeps non-numeric segments case-insensitive", () => {
+  const names = ["MovieB.mkv", "movieA.mkv", "MovieA.mkv"];
+  const sorted = [...names].sort(parser.naturalCompare);
+  assert.deepEqual(sorted, ["movieA.mkv", "MovieA.mkv", "MovieB.mkv"]);
+});
+
+test("cleanSearchQuery extracts pure Chinese or English without mixing", () => {
+  assert.equal(parser.cleanSearchQuery("黑客帝国 The Matrix 1999"), "黑客帝国");
+  assert.equal(parser.cleanSearchQuery("The Matrix Reloaded 2003"), "The Matrix Reloaded");
+  assert.equal(parser.cleanSearchQuery("黑客帝国"), "黑客帝国");
+  assert.equal(parser.cleanSearchQuery("Show.Name.1080p.WEB-DL"), "Show Name");
+});
+
+test("cleanSearchQuery removes season and year markers from directory titles", () => {
+  assert.equal(parser.cleanSearchQuery("Show Name Season 1"), "Show Name");
+  assert.equal(parser.cleanSearchQuery("第2季 Show Name"), "Show Name");
+  assert.equal(parser.cleanSearchQuery("Show Name (2024)"), "Show Name");
+  assert.equal(parser.cleanSearchQuery("Show Name [2024]"), "Show Name");
+});
