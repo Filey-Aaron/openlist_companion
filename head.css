@@ -289,6 +289,19 @@
     background: var(--hope-colors-neutral2, #fafafa);
   }
 
+  .ol-tmdb-sort-area {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .ol-tmdb-sort-toggle {
+    font-size: 11px;
+    padding: 2px 8px;
+    min-height: auto;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+
   .ol-tmdb-file {
     grid-template-columns: 30px 1fr 92px;
   }
