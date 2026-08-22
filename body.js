@@ -45,6 +45,8 @@
       "m4v",
       "mpg",
       "mpeg",
+      "strm",
+      
     ]);
 
     const state = {
