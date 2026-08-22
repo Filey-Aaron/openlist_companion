@@ -46,7 +46,24 @@
       "mpg",
       "mpeg",
       "strm",
-      
+    ]);
+
+    const SUBTITLE_EXTS = new Set([
+      "srt",
+      "ass",
+      "ssa",
+      "vtt",
+      "sub",
+      "idx",
+      "sup",
+      "smi",
+      "sami",
+      "sbv",
+      "lrc",
+      "scc",
+      "stl",
+      "ttml",
+      "dfxp",
     ]);
 
     const state = {
@@ -165,7 +182,8 @@
       return index > 0 ? name.slice(0, index) : name;
     };
 
-    const isVideo = (obj) => !obj.is_dir && VIDEO_EXTS.has(extname(obj.name));
+    const isVideo = (obj) =>
+      !obj.is_dir && (VIDEO_EXTS.has(extname(obj.name)) || SUBTITLE_EXTS.has(extname(obj.name)));
 
     const normalizeName = (name) => String(name || "").toLowerCase();
 
