@@ -45,19 +45,6 @@
       "m4v",
       "mpg",
       "mpeg",
-      "strm",
-    ]);
-    const SUB_EXTS = new Set([
-      "srt",
-      "ass",
-      "ssa",
-      "sub",
-      "vtt",
-      "idx",
-      "sup",
-      "smi",
-      "srt2",
-      "txt",
     ]);
 
     const state = {
@@ -78,7 +65,6 @@
       retryWriteTargets: new Set(),
       compatibilityWarnings: [],
       mode: "movie",
-      sortOrder: "asc",
       currentPath: "/",
       write: false,
       writeContentBypass: false,
@@ -178,26 +164,6 @@
     };
 
     const isVideo = (obj) => !obj.is_dir && VIDEO_EXTS.has(extname(obj.name));
-
-    const isSubtitle = (obj) => !obj.is_dir && SUB_EXTS.has(extname(obj.name));
-
-    const findSubtitleFiles = (videoName) => {
-      const base = basename(videoName);
-      return state.entries.filter((entry) => {
-        if (!isSubtitle(entry)) return false;
-        return basename(entry.name) === base;
-      });
-    };
-
-    const findAssociatedFiles = (videoName) => {
-      const base = basename(videoName);
-      const associatedExts = new Set(["nfo", "jpg", "jpeg", "png", "tbn"]);
-      return state.entries.filter((entry) => {
-        if (!entry || entry.is_dir || entry.name === videoName) return false;
-        if (basename(entry.name) !== base) return false;
-        return isSubtitle(entry) || associatedExts.has(extname(entry.name));
-      });
-    };
 
     const normalizeName = (name) => String(name || "").toLowerCase();
 
@@ -375,72 +341,12 @@
       return state.cleanupRows;
     };
 
-    const naturalCompare = (a, b) => {
-      const aStr = String(a ?? "");
-      const bStr = String(b ?? "");
-      const aParts = aStr.split(/(\d+)/);
-      const bParts = bStr.split(/(\d+)/);
-      const maxLen = Math.max(aParts.length, bParts.length);
-      for (let index = 0; index < maxLen; index += 1) {
-        const aPart = aParts[index] ?? "";
-        const bPart = bParts[index] ?? "";
-        if (aPart === bPart) continue;
-        if (/^\d+$/.test(aPart) && /^\d+$/.test(bPart)) {
-          const aLen = aPart.length;
-          const bLen = bPart.length;
-          if (aLen !== bLen) return aLen - bLen;
-          if (aPart !== bPart) return aPart < bPart ? -1 : 1;
-          continue;
-        }
-        if (aPart === "") return -1;
-        if (bPart === "") return 1;
-        return aPart.localeCompare(bPart, undefined, { sensitivity: "base" });
-      }
-      return aStr.length - bStr.length;
-    };
-
-    const cleanSearchQuery = (name) => {
-      const cleaned = String(name || "")
-        .replace(CLEANUP_TECHNICAL_PATTERN, " ")
-        .replace(/\b(?:19|20)\d{2}\b/g, " ")
-        .replace(/\b(?:season|s)\s*\d+\b/gi, " ")
-        .replace(/第\s*\d+\s*季/g, " ")
-        .replace(/\[[^\]]*]/g, " ")
-        .replace(/【[^】]*】/g, " ")
-        .replace(/\([^)]*\)/g, " ")
-        .replace(/\{[^}]*}/g, " ")
-        .replace(/[._\-]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      const chineseSegments = cleaned.match(/[\u4e00-\u9fff\u3400-\u4dbf]+/g) || [];
-      const englishSegments = cleaned.match(/[a-zA-Z]+/g) || [];
-      const chineseText = chineseSegments.join("").trim();
-      const englishText = englishSegments.join(" ").trim();
-      if (chineseText) return chineseText;
-      if (englishText) return englishText;
-      return cleaned;
-    };
-
     const currentDirectoryTitle = () => {
       const parts = state.currentPath.split("/").filter(Boolean);
       const last = parts.at(-1) || "";
       const parent = parts.at(-2) || last;
-      const useParent = seasonFromDirectoryName(last) || /^\d{1,3}$/.test(last);
-      const candidate = useParent ? parent : last;
+      const candidate = seasonFromDirectoryName(last) ? parent : last;
       return candidate.replace(/[._-]+/g, " ").trim();
-    };
-
-    const directorySearchQuery = () => cleanSearchQuery(currentDirectoryTitle());
-
-    const sortedFiles = () => {
-      const factor = state.sortOrder === "desc" ? -1 : 1;
-      return [...state.files].sort((a, b) => factor * naturalCompare(a.name, b.name));
-    };
-
-    const directoryYear = () => {
-      const title = currentDirectoryTitle();
-      const match = title.match(/(?:^|[.\s_\-[({])((?:19|20)\d{2})(?:$|[.\s_\-\])}])/);
-      return match ? match[1] : "";
     };
 
     const inferMode = (files, path = state.currentPath) => {
@@ -459,10 +365,6 @@
         inferMode,
         inferSeasonFromPath,
         parseEpisodeName,
-        naturalCompare,
-        cleanSearchQuery,
-        currentDirectoryTitle,
-        sortedFiles,
       });
     }
 
@@ -612,17 +514,17 @@
       ...extra,
     });
 
-    const renamePlanStep = (id, sourceName, targetName, enabled, label = "视频") => {
-      if (!enabled) return planStep(id, "rename", label, targetName, "disabled", "未选择", { sourceName });
-      if (!targetName) return planStep(id, "rename", label, targetName, "pending", "待生成目标", { sourceName });
+    const renamePlanStep = (id, sourceName, targetName, enabled) => {
+      if (!enabled) return planStep(id, "rename", "视频", targetName, "disabled", "未选择");
+      if (!targetName) return planStep(id, "rename", "视频", targetName, "pending", "待生成目标");
       if (sourceName === targetName) {
-        return planStep(id, "rename", label, targetName, "unchanged", "无需变更", { sourceName });
+        return planStep(id, "rename", "视频", targetName, "unchanged", "无需变更");
       }
       const existing = findEntry(targetName, sourceName);
       if (existing) {
-        return planStep(id, "rename", label, targetName, "conflict", existing.is_dir ? "与目录冲突" : "目标已存在", { sourceName });
+        return planStep(id, "rename", "视频", targetName, "conflict", existing.is_dir ? "与目录冲突" : "目标已存在");
       }
-      return planStep(id, "rename", label, targetName, "rename", "改名", { sourceName });
+      return planStep(id, "rename", "视频", targetName, "rename", "改名");
     };
 
     const writePlanStep = (id, type, label, name, enabled, overwrite, extra = {}) => {
@@ -1357,7 +1259,7 @@ ${studios}
       const existingRows = new Map(state.tvBatchRows.map((row) => [row.name, row]));
       const selectedSet = new Set(state.selectedNames);
       const parseContext = currentEpisodeParseContext();
-      state.selectedNames = sortedFiles()
+      state.selectedNames = state.files
         .map((file) => file.name)
         .filter((name) => selectedSet.has(name));
       state.tvBatchRows = state.selectedNames.map((name) => {
@@ -1505,24 +1407,15 @@ ${studios}
       }
       const finalVideoName = options.rename ? targetVideoName() : file.name;
       const finalBaseName = basename(finalVideoName);
-      const subtitles = findSubtitleFiles(file.name).map((sub) => ({
-        sourceName: sub.name,
-        targetName: `${finalBaseName}.${extname(sub.name)}`,
-      }));
       const target = {
         videoName: finalVideoName,
         nfoName: `${finalBaseName}.nfo`,
         imageName: state.mode === "tv" ? `${finalBaseName}.jpg` : `${finalBaseName}-poster.jpg`,
         posterName: state.mode === "tv" ? "poster.jpg" : "",
-        subtitles,
       };
       const stillPath = state.mode === "tv" ? state.selectedEpisode?.still_path : state.selectedItem.poster_path;
-      const subtitleSteps = subtitles.map((sub, subIndex) =>
-        renamePlanStep(`single:subtitle:${subIndex}`, sub.sourceName, sub.targetName, options.rename, "字幕"),
-      );
       const steps = [
         renamePlanStep("single:rename", file.name, target.videoName, options.rename),
-        ...subtitleSteps,
         writePlanStep("single:nfo", "nfo", "NFO", target.nfoName, options.nfo, options.overwrite),
         writePlanStep(
           "single:image",
@@ -1573,22 +1466,13 @@ ${studios}
         }
         const finalVideoName = options.rename ? matchedTarget.videoName : row.name;
         const finalBaseName = basename(finalVideoName);
-        const subtitles = findSubtitleFiles(row.name).map((sub) => ({
-          sourceName: sub.name,
-          targetName: `${finalBaseName}.${extname(sub.name)}`,
-        }));
         const target = {
           videoName: finalVideoName,
           nfoName: `${finalBaseName}.nfo`,
           imageName: `${finalBaseName}.jpg`,
-          subtitles,
         };
-        const subtitleSteps = subtitles.map((sub, subIndex) =>
-          renamePlanStep(`batch:${index}:subtitle:${subIndex}`, sub.sourceName, sub.targetName, options.rename, "字幕"),
-        );
         const steps = [
           renamePlanStep(`batch:${index}:rename`, row.name, target.videoName, options.rename),
-          ...subtitleSteps,
           writePlanStep(`batch:${index}:nfo`, "nfo", "NFO", target.nfoName, options.nfo, options.overwrite),
           writePlanStep(
             `batch:${index}:image`,
@@ -1837,7 +1721,7 @@ ${studios}
       }
       const tvMode = state.mode === "tv";
       const selectedSet = new Set(state.selectedNames);
-      list.innerHTML = sortedFiles()
+      list.innerHTML = state.files
         .map(
           (file) => {
             const selected = tvMode ? selectedSet.has(file.name) : file.name === state.selectedName;
@@ -1934,7 +1818,7 @@ ${studios}
       const duplicates = [...groups.values()]
         .filter((group) => group.files.length > 1)
         .map((group) => ({ ...group, size: duplicateSizeAssessment(group.files) }))
-        .sort((a, b) => naturalCompare(a.title, b.title));
+        .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
       state.duplicateReport = {
         mode: state.mode,
         groups: duplicates,
@@ -2305,18 +2189,17 @@ ${studios}
       state.tvSeasonOverride = 0;
       const file = selectedFile();
       if (!file) return;
-      const query = directorySearchQuery();
-      const year = directoryYear();
+      const episode = parseEpisodeName(file.name, currentEpisodeParseContext());
       if (state.mode === "tv") {
-        const episode = parseEpisodeName(file.name, currentEpisodeParseContext());
-        $(".ol-tmdb-query").value = query;
+        $(".ol-tmdb-query").value = episode?.title || currentDirectoryTitle();
         $(".ol-tmdb-year").value = "";
         $(".ol-tmdb-season").value = episode?.season || 1;
         $(".ol-tmdb-episode").value = episode?.episode || "";
         return;
       }
-      $(".ol-tmdb-query").value = query;
-      $(".ol-tmdb-year").value = year;
+      const parsed = parseMovieName(file.name);
+      $(".ol-tmdb-query").value = parsed.title;
+      $(".ol-tmdb-year").value = parsed.year;
     };
 
     const chooseNextFileName = (previousName, renamedName) => {
@@ -2330,7 +2213,7 @@ ${studios}
           if (state.mode === "tv") {
             return a.episode.season - b.episode.season || a.episode.episode - b.episode.episode;
           }
-          return naturalCompare(a.file.name, b.file.name);
+          return a.file.name.localeCompare(b.file.name, undefined, { numeric: true, sensitivity: "base" });
         });
       if (!candidates.length) return "";
       if (state.mode === "tv" && previousEpisode) {
@@ -2376,12 +2259,10 @@ ${studios}
       state.currentPath = requestedPath;
       state.write = Boolean(data.write);
       state.writeContentBypass = Boolean(data.write_content_bypass);
-      entries.sort((a, b) => {
-        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-        return naturalCompare(a.name, b.name);
-      });
       state.entries = entries;
-      state.files = state.entries.filter(isVideo);
+      state.files = state.entries
+        .filter(isVideo)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
       const savedMode = localStorage.getItem(STORAGE.mode);
       state.mode = savedMode === "movie" || savedMode === "tv" ? savedMode : inferMode(state.files);
       const modeSelect = $(".ol-tmdb-mode");
@@ -2390,7 +2271,7 @@ ${studios}
       state.selectedName =
         (preferredName && state.files.some((file) => file.name === preferredName) && preferredName) ||
         (state.selectedName && state.files.some((file) => file.name === state.selectedName) && state.selectedName) ||
-        sortedFiles()[0]?.name ||
+        state.files[0]?.name ||
         "";
       if (state.mode === "tv") {
         const available = new Set(state.files.map((file) => file.name));
@@ -2560,116 +2441,6 @@ ${studios}
       );
     };
 
-    const buildRenumberPlan = () => {
-      const numericFiles = state.files.filter((file) => bareEpisodeNumber(file.name) > 0);
-      const sorted = [...numericFiles].sort((a, b) => naturalCompare(a.name, b.name));
-      const sourceNames = new Set();
-      const targetNames = new Set();
-      const renameObjects = [];
-      sorted.forEach((file, index) => {
-        const newBase = String(index + 1);
-        const ext = extname(file.name);
-        const newName = `${newBase}.${ext}`;
-        sourceNames.add(file.name);
-        targetNames.add(newName);
-        if (file.name !== newName) {
-          renameObjects.push({ src_name: file.name, new_name: newName, kind: "video" });
-        }
-        const associated = findAssociatedFiles(file.name);
-        associated.forEach((entry) => {
-          const assocExt = extname(entry.name);
-          const newAssocName = `${newBase}.${assocExt}`;
-          sourceNames.add(entry.name);
-          targetNames.add(newAssocName);
-          if (entry.name !== newAssocName) {
-            renameObjects.push({ src_name: entry.name, new_name: newAssocName, kind: "associated" });
-          }
-        });
-      });
-      const hardConflicts = renameObjects.filter((rename) => {
-        const existing = findEntry(rename.new_name);
-        return existing && !sourceNames.has(rename.new_name);
-      });
-      return {
-        total: sorted.length,
-        renameObjects,
-        sourceNames,
-        targetNames,
-        hardConflicts,
-        needsTwoPass: renameObjects.some((rename) => {
-          const targetExists = findEntry(rename.new_name);
-          return targetExists && sourceNames.has(rename.new_name);
-        }),
-      };
-    };
-
-    const renumberFiles = async () => {
-      if (!ensureLoadedDirectory()) return;
-      const capabilities = operationCapabilities();
-      if (!capabilities.rename) {
-        setStatus(`无法执行重排序号：${capabilities.renameReason}`, "error");
-        return;
-      }
-      const plan = buildRenumberPlan();
-      if (!plan.total) {
-        setStatus("当前目录没有可重排序号的视频文件（文件名需为纯数字）", "error");
-        return;
-      }
-      if (plan.hardConflicts.length) {
-        setStatus(
-          `重排序号存在 ${plan.hardConflicts.length} 个目标冲突（目标已存在且不在重排范围内），请先调整对应文件`,
-          "error",
-        );
-        return;
-      }
-      if (!plan.renameObjects.length) {
-        setStatus("当前文件已经是连续序号，无需重排", "ok");
-        return;
-      }
-      setBusy(true);
-      const executeRename = async (renameObjects) => {
-        const sorted = [...renameObjects].sort((a, b) => {
-          const aNum = Number(basename(a.new_name)) || 0;
-          const bNum = Number(basename(b.new_name)) || 0;
-          return aNum - bNum;
-        });
-        await batchRename(
-          state.currentPath,
-          sorted.map(({ src_name, new_name }) => ({ src_name, new_name })),
-        );
-      };
-      try {
-        if (plan.needsTwoPass) {
-          const tempRenames = plan.renameObjects.map((rename, index) => ({
-            src_name: rename.src_name,
-            new_name: `.tmp_renumber_${index + 1}.${extname(rename.src_name)}`,
-            kind: rename.kind,
-          }));
-          setStatus(`正在重排 ${plan.renameObjects.length} 个文件（第一步：临时改名）...`);
-          await executeRename(tempRenames);
-          const finalRenames = plan.renameObjects.map((rename, index) => ({
-            src_name: tempRenames[index].new_name,
-            new_name: rename.new_name,
-            kind: rename.kind,
-          }));
-          setStatus(`正在重排 ${plan.renameObjects.length} 个文件（第二步：最终改名）...`);
-          await executeRename(finalRenames);
-        } else {
-          setStatus(`正在重排 ${plan.renameObjects.length} 个文件...`);
-          await executeRename(plan.renameObjects);
-        }
-        await refreshFilesAfterMutation();
-        setStatus(`重排序号完成：成功 ${plan.renameObjects.length} 项`, "ok");
-      } catch (error) {
-        setStatus(`重排序号失败：${error.message}`, "error");
-        try {
-          await refreshFilesAfterMutation();
-        } catch {}
-      } finally {
-        setBusy(false);
-      }
-    };
-
     const doSearch = async () => {
       const query = $(".ol-tmdb-query").value.trim();
       const year = $(".ol-tmdb-year").value.trim();
@@ -2786,20 +2557,13 @@ ${studios}
               ? [{ rowPlan, step }]
               : [];
           });
-          const renameObjects = renamePlans.flatMap(({ rowPlan }) => {
-            const objects = [{ src_name: rowPlan.sourceName, new_name: rowPlan.target.videoName }];
-            const subSteps = rowPlan.steps.filter((s) => s.type === "rename" && s.label === "字幕" && s.run);
-            subSteps.forEach((s) => {
-              objects.push({ src_name: s.sourceName, new_name: s.name });
-            });
-            return objects;
-          });
+          const renameObjects = renamePlans.map(({ rowPlan }) => ({
+            src_name: rowPlan.sourceName,
+            new_name: rowPlan.target.videoName,
+          }));
           if (renameObjects.length) {
             setStatus(`正在批量改名 ${renameObjects.length} 个文件...`);
-            activeSteps = renamePlans.flatMap(({ rowPlan, step }) => [
-              step,
-              ...rowPlan.steps.filter((s) => s.type === "rename" && s.label === "字幕" && s.run),
-            ]);
+            activeSteps = renamePlans.map(({ step }) => step);
             await batchRename(state.currentPath, renameObjects);
             activeSteps.forEach((step) => updateExecutionReport(report, step, "success"));
             activeSteps = [];
@@ -2974,22 +2738,15 @@ ${studios}
 
         report = beginExecutionReport(plan);
         const preparedImages = await preparePlanImages(plan);
-        const renameStep = rowPlan.steps.find((step) => step.type === "rename" && step.label === "视频");
+        const renameStep = rowPlan.steps.find((step) => step.type === "rename");
         if (renameStep?.run) {
           setStatus("正在改名...");
           activeStep = renameStep;
-          const subSteps = rowPlan.steps.filter((step) => step.type === "rename" && step.label === "字幕" && step.run);
-          const renameObjects = [{ src_name: oldName, new_name: newVideoName }];
-          subSteps.forEach((step) => {
-            renameObjects.push({ src_name: step.sourceName, new_name: step.name });
-          });
-          await batchRename(state.currentPath, renameObjects);
+          await batchRename(state.currentPath, [{ src_name: oldName, new_name: newVideoName }]);
           actualName = newVideoName;
           updateExecutionReport(report, renameStep, "success");
-          subSteps.forEach((step) => updateExecutionReport(report, step, "success"));
           activeStep = null;
           messages.push("改名完成");
-          if (subSteps.length) messages.push(`字幕改名 ${subSteps.length} 个`);
         } else if (renameStep?.status === "unchanged") {
           messages.push("文件名无需变更");
         }
@@ -3121,14 +2878,13 @@ ${studios}
                   </select>
                 </label>
                 <button class="ol-tmdb-action ol-tmdb-reload" type="button">刷新文件</button>
-                <button class="ol-tmdb-action ol-tmdb-renumber" type="button">重排序号</button>
                 <button class="ol-tmdb-action ol-tmdb-audit-run" type="button">元数据检查</button>
                 <button class="ol-tmdb-action ol-tmdb-duplicate-run" type="button">重复检测</button>
               </div>
               <div class="ol-tmdb-compatibility"></div>
               <div class="ol-tmdb-permissions"></div>
               <div class="ol-tmdb-list">
-                <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span class="ol-tmdb-sort-area"><button class="ol-tmdb-action ol-tmdb-sort-toggle" type="button" title="切换排序方向">升序 ↑</button></span></div>
+                <div class="ol-tmdb-list-head"><span></span><span>当前目录视频</span><span>大小</span></div>
                 <div class="ol-tmdb-files"></div>
               </div>
               <div class="ol-tmdb-audit"></div>
@@ -3225,14 +2981,6 @@ ${studios}
       document.body.appendChild(mask);
       $(".ol-tmdb-close", mask).addEventListener("click", closeModal);
       $(".ol-tmdb-reload", mask).addEventListener("click", () => withStatus(loadFiles));
-      $(".ol-tmdb-sort-toggle", mask).addEventListener("click", () => {
-        state.sortOrder = state.sortOrder === "asc" ? "desc" : "asc";
-        const btn = $(".ol-tmdb-sort-toggle");
-        if (btn) btn.textContent = state.sortOrder === "asc" ? "升序 ↑" : "降序 ↓";
-        syncTvBatchRows();
-        render();
-      });
-      $(".ol-tmdb-renumber", mask).addEventListener("click", () => withStatus(renumberFiles));
       $(".ol-tmdb-audit-run", mask).addEventListener("click", runMetadataCheck);
       $(".ol-tmdb-duplicate-run", mask).addEventListener("click", runDuplicateCheck);
       $(".ol-tmdb-cleanup-generate", mask).addEventListener("click", () => {
@@ -3246,7 +2994,7 @@ ${studios}
         setStatus(rows.length ? `发现 ${rows.length} 个文件名清理候选` : "当前规则没有发现可清理的文件名", rows.length ? "ok" : "");
       });
       $(".ol-tmdb-select-all-files", mask).addEventListener("click", () => {
-        state.selectedNames = sortedFiles().map((file) => file.name);
+        state.selectedNames = state.files.map((file) => file.name);
         state.selectedName = state.selectedNames[0] || "";
         if (state.selectedNames.length < 2) {
           state.selectedItem = null;
@@ -3372,60 +3120,6 @@ ${studios}
       }
     };
 
-    const autoMatchTvShow = async () => {
-      const pathSeason = inferSeasonFromPath(state.currentPath);
-      if (state.mode !== "tv" && !pathSeason) return;
-      const title = directorySearchQuery();
-      if (!title) return;
-      const key = $(".ol-tmdb-api-key")?.value.trim() || localStorage.getItem(STORAGE.key);
-      if (!key) {
-        setStatus("未检测到 TMDB API Key，已跳过自动匹配", "error");
-        return;
-      }
-      if (pathSeason && state.mode !== "tv") {
-        state.mode = "tv";
-        const modeSelect = $(".ol-tmdb-mode");
-        if (modeSelect) modeSelect.value = "tv";
-        updateModeUi();
-      }
-      if (pathSeason) {
-        const seasonInput = $(".ol-tmdb-season");
-        if (seasonInput) seasonInput.value = pathSeason;
-        state.tvSeasonOverride = pathSeason;
-      }
-      if (state.mode === "tv" && state.files.length > 1) {
-        state.selectedNames = sortedFiles().map((file) => file.name);
-        state.selectedName = state.selectedNames[0];
-        syncTvBatchRows();
-      }
-      const queryInput = $(".ol-tmdb-query");
-      if (queryInput) queryInput.value = title;
-      setBusy(true);
-      setStatus(`自动搜索 TMDB: ${title}...`);
-      try {
-        const payload = await searchTv(title, "");
-        state.results = (payload.results || []).slice(0, 10);
-        state.selectedItem = null;
-        state.selectedEpisode = null;
-        if (state.results.length === 1) {
-          setStatus(`自动匹配到: ${itemDisplayTitle(state.results[0])}`);
-          await selectItem(state.results[0].id);
-        } else {
-          render();
-          setStatus(
-            state.results.length
-              ? `自动搜索完成，找到 ${state.results.length} 个结果，请选择`
-              : `自动搜索"${title}"无结果，请手动搜索`,
-            state.results.length ? "" : "error",
-          );
-        }
-      } catch (error) {
-        setStatus(error.message, "error");
-      } finally {
-        setBusy(false);
-      }
-    };
-
     const openModal = () => {
       const path = currentOpenListPath();
       if (path !== state.currentPath) resetDirectoryState(path);
@@ -3434,10 +3128,7 @@ ${studios}
       state.results = [];
       state.selectedItem = null;
       state.selectedEpisode = null;
-      withStatus(async () => {
-        const loaded = await loadFiles();
-        if (loaded) await autoMatchTvShow();
-      });
+      withStatus(loadFiles);
     };
 
     const closeModal = () => {
